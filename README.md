@@ -40,6 +40,8 @@ resets the car to the last dry spot; grass, scrub and sand are drivable but slow
 - `src/main.js` – renderer, scene, game loop (fixed 120 Hz physics step)
 - `src/world.js` – builds tiles of merged geometry from the map file, plus the
   collision grid, road lookup, surface raster and minimap image
+- `src/buildings.js` – building archetypes (houses, main-street shops with
+  verandahs, sheds, …), hipped/gable/flat roofs and the generated facade atlas
 - `src/car.js` – car model and arcade handling, building/tree collision
 - `src/camera.js` – chase and high cameras
 - `src/input.js` – keyboard, gamepad and touch input
