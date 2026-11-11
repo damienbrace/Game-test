@@ -6,6 +6,7 @@
 // with y up, so a map point (x, y) sits at world (x, 0, -y).
 
 import * as THREE from 'three';
+import { addBuildings } from './buildings.js';
 
 export const TILE = 500;
 
@@ -27,33 +28,7 @@ const C = {
   white: col(0xf0f0ea), yellow: col(0xe8c34a),
 };
 
-const BCOL = {
-  // walls, roofs per building kind (index into data.buildingKinds)
-  walls: [
-    [0xe2d6bd, 0xd8c7a6, 0xc98f6a, 0xeee9df, 0xcfb796, 0xb9805e],
-    [0xe4e0d6, 0xcfd3d6, 0xd9cbb5, 0xbfc7cc, 0xe8dcc6],
-    [0xb9bcbf, 0xc8c2b4, 0xa9b0b5, 0xd1cdc4],
-    [0xd9c7a3, 0xc9b28c, 0xe0d4c0],
-    [0x9aa0a6],
-    [0xa6a59c, 0xb7b1a2, 0x8f9a8f],
-    [0xd8d4c8],
-    [0xe6e6e0, 0xcfd2d0],
-    [0xd6cdb8],
-  ],
-  roofs: [
-    [0xa9583a, 0x6e7479, 0x4f565c, 0x9a4c34, 0x8a8f8f, 0xb87a52],
-    [0xa7aaad, 0x8f9498, 0xbcbcb6],
-    [0x9ea6ad, 0x8c949b, 0xb3b8bb],
-    [0x7f4a38, 0x8b8f92],
-    [0x9aa0a6],
-    [0x8c9096, 0x6f7a6f],
-    [0xc4c0b4],
-    [0xdcdcd6],
-    [0x8b5a44],
-  ],
-};
-
-const GLASS = [0x3d5568, 0x46606f, 0x4a5866, 0x3b5258].map((h) => new THREE.Color(h));
+// Building geometry, palettes and facade textures live in buildings.js.
 
 function hash(n) {
   n = (n ^ 61) ^ (n >>> 16);
@@ -357,89 +332,26 @@ export class World {
   }
 
   buildBuildings() {
-    const tmp = new THREE.Color();
-    const d = this.data;
-    d.buildings.forEach((b, bi) => {
-      const kind = b.k;
-      const hv = hash(bi * 7 + 3);
-      const wallList = BCOL.walls[kind], roofList = BCOL.roofs[kind];
-      const wall = new THREE.Color(wallList[Math.floor(hv * wallList.length)]);
-      const roof = new THREE.Color(roofList[Math.floor(hash(bi * 13 + 5) * roofList.length)]);
-      const shade = 0.92 + hash(bi * 3 + 1) * 0.16;
-      wall.multiplyScalar(shade);
-      const wallLow = tmp.copy(wall).multiplyScalar(0.72).clone();
-      const isRoof = kind === 4;
-      const glass = GLASS[Math.floor(hash(bi * 5 + 9) * GLASS.length)];
-      const h = Math.max(2.5, b.h);
-      const base = isRoof ? h - 0.45 : 0;
-      const rings = [b.p, ...(b.i || [])];
-      let cx = 0, cy = 0;
-      for (let i = 0; i < b.p.length; i += 2) { cx += b.p[i]; cy += b.p[i + 1]; }
-      cx /= b.p.length / 2; cy /= b.p.length / 2;
-      const o = this.obj(cx, cy);
-      for (const ring of rings) {
+    // visible geometry: own meshes, merged per chunk (src/buildings.js)
+    addBuildings(this, this.data.buildings);
+    // collision: the footprint walls, exactly as drawn on the map
+    this.data.buildings.forEach((b) => {
+      if (b.k === 4) return; // roofs / carports: drive under them
+      for (const ring of [b.p, ...(b.i || [])]) {
         const n = ring.length / 2;
         for (let i = 0; i < n; i++) {
           const j = (i + 1) % n;
           const ax = ring[2 * i], ay = ring[2 * i + 1], bx = ring[2 * j], by = ring[2 * j + 1];
-          const len = Math.hypot(bx - ax, by - ay);
-          if (len < 0.05) continue;
-          // outer ring CCW, holes CW: outward normal is the edge's right side
-          const nx = (by - ay) / len, ny = -(bx - ax) / len;
-          const nrm = [nx, 0, -ny];
-          const A0 = [ax, base, -ay], B0 = [bx, base, -by], A1 = [ax, h, -ay], B1 = [bx, h, -by];
-          const lo = isRoof ? wall : wallLow;
-          this.tri3(o, A0, B0, B1, nrm, [lo, lo, wall]);
-          this.tri3(o, A0, B1, A1, nrm, [lo, wall, wall]);
-          if (!isRoof) this.addColSeg(ax, ay, bx, by);
-          if (ring === b.p) this.windows(o, kind, h, ax, ay, bx, by, len, nrm, glass);
+          if (Math.hypot(bx - ax, by - ay) < 0.05) continue;
+          this.addColSeg(ax, ay, bx, by);
         }
       }
-      // roof
-      let tr;
-      try { tr = triangulate(rings); } catch (e) { tr = null; }
-      if (tr) {
-        for (const [a, bb, c] of tr.tris) {
-          const P = tr.pts;
-          this.tri3(o, [P[a][0], h, -P[a][1]], [P[bb][0], h, -P[bb][1]], [P[c][0], h, -P[c][1]], [0, 1, 0], roof);
-          if (isRoof) this.tri3(o, [P[a][0], base, -P[a][1]], [P[bb][0], base, -P[bb][1]], [P[c][0], base, -P[c][1]], [0, -1, 0], roof);
-        }
-      }
-      if (!isRoof) {
-        const poly = { p: b.p, bb: bbox(b.p) };
-        this.buildingPolys.push(poly);
-        const G = this.CG;
-        for (let gx = Math.floor(poly.bb[0] / G); gx <= Math.floor(poly.bb[2] / G); gx++)
-          for (let gy = Math.floor(poly.bb[1] / G); gy <= Math.floor(poly.bb[3] / G); gy++) this.colCell(gx, gy).p.push(poly);
-      }
+      const poly = { p: b.p, bb: bbox(b.p) };
+      this.buildingPolys.push(poly);
+      const G = this.CG;
+      for (let gx = Math.floor(poly.bb[0] / G); gx <= Math.floor(poly.bb[2] / G); gx++)
+        for (let gy = Math.floor(poly.bb[1] / G); gy <= Math.floor(poly.bb[3] / G); gy++) this.colCell(gx, gy).p.push(poly);
     });
-  }
-
-  // Window quads sit 8 cm proud of the wall (like frames), so they never
-  // share a plane with it.
-  windows(o, kind, h, ax, ay, bx, by, len, nrm, glass) {
-    if (len < 2.5 || !(kind === 0 || kind === 1 || kind === 3)) return;
-    const dx = (bx - ax) / len, dy = (by - ay) / len;
-    const ox = nrm[0] * 0.08, oz = nrm[2] * 0.08;
-    const quad = (s0, s1, y0, y1) => {
-      const x0 = ax + dx * s0 + ox, z0 = -(ay + dy * s0) + oz, x1 = ax + dx * s1 + ox, z1 = -(ay + dy * s1) + oz;
-      this.tri3(o, [x0, y0, z0], [x1, y0, z1], [x1, y1, z1], nrm, glass);
-      this.tri3(o, [x0, y0, z0], [x1, y1, z1], [x0, y1, z0], nrm, glass);
-    };
-    if (kind === 0 && h < 7) {
-      // houses: separate windows in ~3.6 m slots
-      const n = Math.min(10, Math.floor(len / 3.6));
-      const slot = len / Math.max(1, n);
-      for (let i = 0; i < n; i++) quad(slot * (i + 0.5) - 0.65, slot * (i + 0.5) + 0.65, 1.0, 2.1);
-      return;
-    }
-    const floors = Math.max(1, Math.min(14, Math.floor((h - 0.6) / 3.3)));
-    const m = Math.min(0.7, len * 0.15);
-    for (let f = 0; f < floors; f++) {
-      const y = f * 3.3;
-      if (f === 0 && kind === 1) quad(m, len - m, 0.5, 2.5); // shopfront
-      else quad(m, len - m, y + 1.1, y + 2.2);
-    }
   }
 
   buildTrees() {
