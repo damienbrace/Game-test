@@ -1,0 +1,21 @@
+[out:json][timeout:180];
+(
+  node["natural"~"^(tree|shrub)$"](-33.365,115.612,-33.300,115.690);
+  way["natural"="tree_row"](-33.365,115.612,-33.300,115.690);
+  node["highway"~"^(street_lamp|traffic_signals|crossing|bus_stop|give_way|stop)$"](-33.365,115.612,-33.300,115.690);
+  node["public_transport"="platform"](-33.365,115.612,-33.300,115.690);
+  node["amenity"~"^(bench|waste_basket|bicycle_parking|drinking_water|post_box|telephone|shelter|bbq|recycling)$"](-33.365,115.612,-33.300,115.690);
+  node["leisure"~"^(playground|picnic_table|fitness_station)$"](-33.365,115.612,-33.300,115.690);
+  node["playground"](-33.365,115.612,-33.300,115.690);
+  way["playground"](-33.365,115.612,-33.300,115.690);
+  node["barrier"](-33.365,115.612,-33.300,115.690);
+  way["barrier"](-33.365,115.612,-33.300,115.690);
+  node["power"~"^(pole|tower|transformer)$"](-33.365,115.612,-33.300,115.690);
+  way["power"~"^(line|minor_line)$"](-33.365,115.612,-33.300,115.690);
+  node["man_made"~"^(flagpole|mast|utility_pole|street_cabinet|monitoring_station|water_tap)$"](-33.365,115.612,-33.300,115.690);
+  node["tourism"~"^(information|picnic_site|artwork|viewpoint)$"](-33.365,115.612,-33.300,115.690);
+  node["emergency"="fire_hydrant"](-33.365,115.612,-33.300,115.690);
+);
+out body;
+>;
+out skel qt;
