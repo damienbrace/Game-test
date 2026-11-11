@@ -194,6 +194,9 @@ function areaKind(t) {
   return null;
 }
 
+// harbour / marina / dock basins get a quay edge in the game
+const isHarbour = (t) => t.waterway === 'dock' || t.leisure === 'marina' || /harbou?r|marina|dock/i.test(t.name || '');
+const quays = [];
 const relMemberWays = new Set();
 for (const r of rels) {
   const t = r.tags || {};
@@ -213,7 +216,10 @@ for (const r of rels) {
   for (const o of outers) {
     const hs = inners.filter((h) => h.length && pointInRing(h[0][0], h[0][1], o));
     const p = clipPolygon(o, hs, box);
-    if (p) areas[kind].push(p);
+    if (p) {
+      areas[kind].push(p);
+      if (kind === 'water' && isHarbour(t)) quays.push(flat(p[0]));
+    }
   }
 }
 const pierLines = [];
@@ -230,7 +236,10 @@ for (const w of ways.values()) {
   if (!isClosed(w)) continue;
   if (relMemberWays.has(w.id) && !t.natural && !t.leisure && !t.landuse) continue;
   const p = clipPolygon(wayPts(w), [], kind === 'water' ? CLIP : PLAY);
-  if (p) areas[kind].push(p);
+  if (p) {
+    areas[kind].push(p);
+    if (kind === 'water' && isHarbour(t)) quays.push(flat(p[0]));
+  }
 }
 
 // ---------------------------------------------------------------- coastline -> sea polygons
@@ -269,17 +278,17 @@ function buildSea() {
     }
   }
   const pieces = [];
-  const sea = [], land = [], coast = [];
+  const sea = [], land = [], coastLines = [];
   for (const ch of chains) {
     const pts = ch.map((id) => nodes.get(id)).filter(Boolean).map((n) => proj(n.lat, n.lon));
     const closed = ch[0] === ch[ch.length - 1];
+    coastLines.push(pts);
     if (closed && pts.every(([x, y]) => x > x0 && x < x1 && y > y0 && y < y1)) {
       // island (CCW) or enclosed sea (CW)
       const ring = dropClosingDup(pts);
       if (signedArea(ring) > 0) land.push([ring]); else sea.push([ring.reverse()]);
       continue;
     }
-    for (const run of clipPolyline(pts, PLAY)) coast.push(flat(run.pts));
     for (const run of clipPolyline(pts, CLIP)) {
       const sIn = perim(run.pts[0]), sOut = perim(run.pts[run.pts.length - 1]);
       if (sIn === null || sOut === null) { console.warn('coastline piece does not reach the clip box; skipped'); continue; }
@@ -310,10 +319,132 @@ function buildSea() {
     }
     sea.push([ring]);
   }
-  return { sea, land, coast };
+  return { sea, land, coastLines };
 }
-const { sea, land, coast } = buildSea();
+const { sea, land, coastLines } = buildSea();
 areas.land.push(...land);
+
+// ---------------------------------------------------------------- coast edge kinds
+// OSM has no tag for "this shore is a beach" unless natural=beach is mapped,
+// so each coastline segment is classified from the geometry:
+//   0 beach  - inside / next to a mapped beach or sand area, or an open-ocean
+//              shore (most rays cast seaward travel 2.5 km without meeting land)
+//   1 hard   - sheltered shore (harbour, marina, bay edges): rock / seawall
+//   2 mole   - land narrower than ~70 m behind the shore (breakwaters,
+//              groynes, harbour walls): rock armour
+// Runs shorter than 50 m are merged into their neighbours.
+const COAST_KIND = { beach: 0, hard: 1, mole: 2 };
+function classifyCoast() {
+  const segs = [];
+  for (const pts of coastLines) for (let i = 0; i < pts.length - 1; i++) segs.push([pts[i], pts[i + 1]]);
+  const SG = 200, sgrid = new Map();
+  segs.forEach((s, si) => {
+    for (let gx = Math.floor(Math.min(s[0][0], s[1][0]) / SG); gx <= Math.floor(Math.max(s[0][0], s[1][0]) / SG); gx++)
+      for (let gy = Math.floor(Math.min(s[0][1], s[1][1]) / SG); gy <= Math.floor(Math.max(s[0][1], s[1][1]) / SG); gy++) {
+        const k = gx * 100000 + gy;
+        if (!sgrid.has(k)) sgrid.set(k, []);
+        sgrid.get(k).push(si);
+      }
+  });
+  // distance along the ray (ox,oy)+t(dx,dy), t in (0,maxT], to the first coast segment
+  const rayHit = (ox, oy, dx, dy, maxT) => {
+    let best = Infinity;
+    const steps = Math.ceil(maxT / (SG / 2));
+    const seen = new Set();
+    for (let k = 0; k <= steps && best === Infinity; k++) {
+      const cx = ox + dx * k * SG / 2, cy = oy + dy * k * SG / 2;
+      for (let gx = Math.floor(cx / SG) - 1; gx <= Math.floor(cx / SG) + 1; gx++) for (let gy = Math.floor(cy / SG) - 1; gy <= Math.floor(cy / SG) + 1; gy++) {
+        for (const si of sgrid.get(gx * 100000 + gy) || []) {
+          if (seen.has(si)) continue;
+          seen.add(si);
+          const [a, b] = segs[si];
+          const ex = b[0] - a[0], ey = b[1] - a[1];
+          const den = dx * ey - dy * ex;
+          if (Math.abs(den) < 1e-9) continue;
+          const t = ((a[0] - ox) * ey - (a[1] - oy) * ex) / den;
+          const u = ((a[0] - ox) * dy - (a[1] - oy) * dx) / den;
+          if (t > 1e-3 && t <= maxT && u >= 0 && u <= 1 && t < best) best = t;
+        }
+      }
+    }
+    return best;
+  };
+  const sandBB = areas.sand.map((p) => {
+    let a = Infinity, b = Infinity, c = -Infinity, d = -Infinity;
+    for (const q of p[0]) { a = Math.min(a, q[0]); c = Math.max(c, q[0]); b = Math.min(b, q[1]); d = Math.max(d, q[1]); }
+    return [a - 30, b - 30, c + 30, d + 30];
+  });
+  const nearSand = (x, y) => {
+    for (let i = 0; i < areas.sand.length; i++) {
+      const bb = sandBB[i];
+      if (x < bb[0] || x > bb[2] || y < bb[1] || y > bb[3]) continue;
+      const ring = areas.sand[i][0];
+      if (pointInRing(x, y, ring)) return true;
+      for (let j = 0, k = ring.length - 1; j < ring.length; k = j++) if (distPointSeg(x, y, ring[k], ring[j]) < 30) return true;
+    }
+    return false;
+  };
+  const out = [];
+  for (const pts of coastLines) {
+    for (const run of clipPolyline(pts, PLAY)) {
+      const p = run.pts;
+      const kinds = [], lens = [];
+      for (let i = 0; i < p.length - 1; i++) {
+        const a = p[i], b = p[i + 1];
+        const len = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1e-6;
+        const tx = (b[0] - a[0]) / len, ty = (b[1] - a[1]) / len;
+        const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
+        // land on the left, sea on the right
+        const lx = -ty, ly = tx;
+        let k;
+        if (nearSand(mx, my)) k = COAST_KIND.beach;
+        else {
+          const thick = Math.min(
+            rayHit(mx + lx * 0.3, my + ly * 0.3, lx, ly, 120),
+            rayHit(mx + lx * 0.3, my + ly * 0.3, lx * 0.94 + tx * 0.34, ly * 0.94 + ty * 0.34, 120),
+            rayHit(mx + lx * 0.3, my + ly * 0.3, lx * 0.94 - tx * 0.34, ly * 0.94 - ty * 0.34, 120),
+          );
+          if (thick < 70) k = COAST_KIND.mole;
+          else {
+            let open = 0;
+            for (let q = -5; q <= 5; q++) {
+              const ang = q * 0.17; // +-50 degrees around the seaward normal
+              const c = Math.cos(ang), s = Math.sin(ang);
+              const dx = -lx * c - tx * s, dy = -ly * c - ty * s;
+              if (rayHit(mx - lx * 0.3, my - ly * 0.3, dx, dy, 2500) === Infinity) open++;
+            }
+            k = open >= 8 ? COAST_KIND.beach : COAST_KIND.hard;
+          }
+        }
+        kinds.push(k);
+        lens.push(len);
+      }
+      // merge short runs into the longer neighbour, repeatedly
+      for (let pass = 0; pass < 4; pass++) {
+        let i = 0;
+        while (i < kinds.length) {
+          let j = i, L = 0;
+          while (j < kinds.length && kinds[j] === kinds[i]) L += lens[j++];
+          if (L < 50 && (i > 0 || j < kinds.length)) {
+            const prev = i > 0 ? kinds[i - 1] : kinds[j];
+            const next = j < kinds.length ? kinds[j] : prev;
+            for (let q = i; q < j; q++) kinds[q] = prev === next ? prev : (i > 0 ? prev : next);
+          }
+          i = j;
+        }
+      }
+      let s = 0;
+      for (let i = 1; i <= kinds.length; i++) {
+        if (i === kinds.length || kinds[i] !== kinds[s]) {
+          out.push({ k: kinds[s], p: flat(p.slice(s, i + 1)) });
+          s = i;
+        }
+      }
+    }
+  }
+  return out;
+}
+const coast = classifyCoast();
 
 // ---------------------------------------------------------------- roads
 const CLASSES = ['trunk', 'primary', 'secondary', 'tertiary', 'unclassified', 'residential', 'service', 'track', 'path'];
@@ -351,9 +482,7 @@ for (const w of ways.values()) {
   if (c < 8) for (const id of new Set(w.nodes)) nodeUse.set(id, (nodeUse.get(id) || 0) + 1);
   if (c < 8 && w.nodes[0] === w.nodes[w.nodes.length - 1]) nodeUse.set(w.nodes[0], 2);
 }
-const roads = [];
-for (const [w, c] of roadWays) {
-  const t = w.tags;
+function roadWidth(t, c) {
   const oneway = t.oneway === 'yes' || t.oneway === '1' || t.junction === 'roundabout';
   let width = parseFloat(t.width);
   if (!(width > 1.5 && width < 40)) {
@@ -361,7 +490,81 @@ for (const [w, c] of roadWays) {
     if (lanes > 0 && lanes < 8 && c < 7) width = lanes * 3.3 + (c <= 2 ? 1 : 0.4);
     else width = BASE_W[c] * (oneway && c <= 4 ? 0.62 : 1);
   }
-  width = Math.min(width, 16);
+  return Math.min(width, 16);
+}
+
+// Roundabouts: join the roundabout ways into closed rings. A ring that is
+// star-shaped around its centroid is stored as a centre plus a radius profile
+// (RB_N samples); the game draws it as a smooth annulus with a round island,
+// and its ways are flagged r=2 so they are not drawn again as strips.
+const RB_N = 36;
+const roundabouts = [];
+const ringWayIds = new Set();
+{
+  const rw = roadWays.filter(([w, c]) => w.tags.junction === 'roundabout' && c < 8);
+  const pool = rw.map(([w, c]) => ({ ids: [w.id], nodes: w.nodes.slice(), c, wd: roadWidth(w.tags, c), lanes: parseInt(w.tags.lanes, 10) || 0 }));
+  const rings = [];
+  while (pool.length) {
+    const ring = pool.shift();
+    let guard = 0;
+    while (ring.nodes[0] !== ring.nodes[ring.nodes.length - 1] && guard++ < 100) {
+      const end = ring.nodes[ring.nodes.length - 1];
+      const k = pool.findIndex((p) => p.nodes[0] === end);
+      if (k < 0) break;
+      const p = pool.splice(k, 1)[0];
+      ring.nodes = ring.nodes.concat(p.nodes.slice(1));
+      ring.ids.push(...p.ids);
+      ring.c = Math.min(ring.c, p.c);
+      ring.wd = Math.max(ring.wd, p.wd);
+      ring.lanes = Math.max(ring.lanes, p.lanes);
+    }
+    if (ring.nodes[0] === ring.nodes[ring.nodes.length - 1] && ring.nodes.length >= 5) rings.push(ring);
+  }
+  for (const ring of rings) {
+    const pts = dropClosingDup(ring.nodes.map((id) => nodes.get(id)).filter(Boolean).map((n) => proj(n.lat, n.lon)));
+    if (pts.length < 4) continue;
+    // area centroid
+    let A = 0, cx = 0, cy = 0;
+    for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+      const f = pts[j][0] * pts[i][1] - pts[i][0] * pts[j][1];
+      A += f; cx += (pts[j][0] + pts[i][0]) * f; cy += (pts[j][1] + pts[i][1]) * f;
+    }
+    if (Math.abs(A) < 1e-6) continue;
+    cx /= 3 * A; cy /= 3 * A;
+    if (cx < PLAY[0] || cx > PLAY[2] || cy < PLAY[1] || cy > PLAY[3]) continue;
+    const rad = [];
+    let ok = true;
+    for (let s = 0; s < RB_N && ok; s++) {
+      const a = (s / RB_N) * Math.PI * 2, dx = Math.cos(a), dy = Math.sin(a);
+      const hits = [];
+      for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+        const P = pts[j], Q = pts[i];
+        const ex = Q[0] - P[0], ey = Q[1] - P[1];
+        const den = dx * ey - dy * ex;
+        if (Math.abs(den) < 1e-12) continue;
+        const t = ((P[0] - cx) * ey - (P[1] - cy) * ex) / den;
+        const u = ((P[0] - cx) * dy - (P[1] - cy) * dx) / den;
+        if (t > 0 && u >= 0 && u < 1) hits.push(t);
+      }
+      if (hits.length !== 1) ok = false; else rad.push(hits[0]);
+    }
+    if (!ok) continue;
+    const mean = rad.reduce((a, b) => a + b, 0) / rad.length;
+    if (mean < 4 || mean > 70 || mean - ring.wd / 2 < 1.5) continue;
+    // light smoothing of the radius profile (OSM rings are coarse polygons)
+    const sm = rad.map((_, i) => (rad[(i + RB_N - 1) % RB_N] + 2 * rad[i] + rad[(i + 1) % RB_N]) / 4);
+    for (const id of ring.ids) ringWayIds.add(id);
+    const o = { x: r1(cx), y: r1(cy), w: r1(ring.wd), c: ring.c, rr: sm.map(r1) };
+    if (ring.lanes >= 2) o.l = ring.lanes;
+    roundabouts.push(o);
+  }
+}
+
+const roads = [];
+for (const [w, c] of roadWays) {
+  const t = w.tags;
+  const oneway = t.oneway === 'yes' || t.oneway === '1' || t.junction === 'roundabout';
+  const width = roadWidth(t, c);
   // clip to play area, tracking which vertices are junctions
   const pts = [], junc = [];
   for (const id of w.nodes) {
@@ -386,7 +589,9 @@ for (const [w, c] of roadWays) {
     if (n >= 0) r.n = n;
     if (oneway) r.o = 1;
     if (t.bridge && t.bridge !== 'no') r.b = 1;
-    if (t.junction === 'roundabout') r.r = 1;
+    if (t.junction === 'roundabout') r.r = ringWayIds.has(w.id) ? 2 : 1;
+    const lanes = parseInt(t.lanes, 10);
+    if (c < 8 && lanes >= (oneway ? 2 : 3) && lanes < 8) r.l = lanes;
     if (t.surface && /unpaved|gravel|dirt|sand|ground|grass|compacted/.test(t.surface)) r.u = 1;
     if (j.length) r.j = j;
     roads.push(r);
@@ -394,11 +599,71 @@ for (const [w, c] of roadWays) {
 }
 
 // ---------------------------------------------------------------- rail
-const rail = [];
+const rail = [], railBridges = [];
 for (const w of ways.values()) {
   if (w.tags && w.tags.railway === 'rail' && !(w.tags.tunnel && w.tags.tunnel !== 'no')) {
-    for (const run of clipPolyline(wayPts(w), PLAY)) rail.push(flat(run.pts));
+    const br = w.tags.bridge && w.tags.bridge !== 'no';
+    for (const run of clipPolyline(wayPts(w), PLAY)) (br ? railBridges : rail).push(flat(run.pts));
   }
+}
+
+// ---------------------------------------------------------------- rivers
+// waterway=river/canal centrelines (e.g. the Preston River); drawn as water
+// strips so the bridges over them cross something.
+const rivers = [];
+for (const w of ways.values()) {
+  const t = w.tags;
+  if (!t || !(t.waterway === 'river' || t.waterway === 'canal') || (t.tunnel && t.tunnel !== 'no')) continue;
+  let wd = parseFloat(t.width);
+  if (!(wd > 2 && wd < 200)) wd = t.waterway === 'river' ? 24 : 8;
+  for (const run of clipPolyline(wayPts(w), PLAY)) rivers.push({ w: r1(wd), p: flat(run.pts) });
+}
+
+// ---------------------------------------------------------------- sports pitches
+// Line markings need the pitch's orientation and size: store the minimum-area
+// bounding rectangle of each pitch whose sport has markings we can draw.
+const SPORTS = { australian_football: 'afl', cricket: 'cricket', soccer: 'soccer', rugby_union: 'rugby', rugby_league: 'rugby', tennis: 'tennis', basketball: 'basketball', netball: 'netball', hockey: 'hockey', field_hockey: 'hockey' };
+function convexHull(pts) {
+  const p = pts.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const cr = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const lo = [], up = [];
+  for (const q of p) { while (lo.length >= 2 && cr(lo[lo.length - 2], lo[lo.length - 1], q) <= 0) lo.pop(); lo.push(q); }
+  for (let i = p.length - 1; i >= 0; i--) { const q = p[i]; while (up.length >= 2 && cr(up[up.length - 2], up[up.length - 1], q) <= 0) up.pop(); up.push(q); }
+  return lo.slice(0, -1).concat(up.slice(0, -1));
+}
+const sports = [];
+for (const w of ways.values()) {
+  const t = w.tags;
+  if (!t || t.leisure !== 'pitch' || !isClosed(w)) continue;
+  const sp = SPORTS[(t.sport || '').split(';')[0]];
+  if (!sp) continue;
+  const hull = convexHull(dropClosingDup(wayPts(w)));
+  if (hull.length < 3) continue;
+  let best = null;
+  for (let i = 0; i < hull.length; i++) {
+    const a = hull[i], b = hull[(i + 1) % hull.length];
+    const l = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    if (l < 1e-6) continue;
+    const ux = (b[0] - a[0]) / l, uy = (b[1] - a[1]) / l;
+    let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity;
+    for (const q of hull) {
+      const u = q[0] * ux + q[1] * uy, v = -q[0] * uy + q[1] * ux;
+      u0 = Math.min(u0, u); u1 = Math.max(u1, u); v0 = Math.min(v0, v); v1 = Math.max(v1, v);
+    }
+    const area = (u1 - u0) * (v1 - v0);
+    if (!best || area < best.area) best = { area, ux, uy, u0, u1, v0, v1 };
+  }
+  if (!best) continue;
+  let { ux, uy, u0, u1, v0, v1 } = best;
+  const cu = (u0 + u1) / 2, cv = (v0 + v1) / 2;
+  const x = cu * ux - cv * uy, y = cu * uy + cv * ux;
+  if (x < PLAY[0] || x > PLAY[2] || y < PLAY[1] || y > PLAY[3]) continue;
+  let L = u1 - u0, W = v1 - v0, a = Math.atan2(uy, ux);
+  if (W > L) { [L, W] = [W, L]; a += Math.PI / 2; }
+  a = Math.atan2(Math.sin(a), Math.cos(a));
+  if (a < 0) a += Math.PI;
+  if (L < 8) continue;
+  sports.push({ s: sp, x: r1(x), y: r1(y), a: Math.round(a * 1000) / 1000, L: r1(L), W: r1(W) });
 }
 
 // ---------------------------------------------------------------- buildings
@@ -541,7 +806,7 @@ for (const b of buildings) {
   }
 }
 const allRoadSegs = new Map();
-for (const r of roads) {
+for (const r of [...roads, ...rivers]) {
   for (let i = 0; i < r.p.length - 2; i += 2) {
     const a = [r.p[i], r.p[i + 1]], b = [r.p[i + 2], r.p[i + 3]];
     const gx0 = Math.floor((Math.min(a[0], b[0]) - 10) / GRID), gx1 = Math.floor((Math.max(a[0], b[0]) + 10) / GRID);
@@ -633,10 +898,15 @@ const out = {
   names,
   roads,
   rail,
+  railBridges,
   sea: sea.map(polyOut),
   coast,
   areas: Object.fromEntries(Object.entries(areas).map(([k, v]) => [k, v.map(polyOut)])),
   piers: pierLines,
+  roundabouts,
+  rivers,
+  quays,
+  sports,
   buildings,
   trees,
   pois,
@@ -647,6 +917,7 @@ fs.writeFileSync(outPath, json);
 console.log(`wrote ${outPath}: ${(json.length / 1024).toFixed(0)} KB`);
 console.log(`roads ${roads.length} (named ${roads.filter((r) => r.n !== undefined).length}, drivable ${roads.filter((r) => r.c < 8).length}), names ${names.length}`);
 console.log(`buildings ${buildings.length} (dropped ${droppedOnRoad} crossed by roads), trees ${trees.length / 3}, rail ${rail.length}, piers ${pierLines.length}, pois ${pois.length}`);
+console.log(`coast runs ${coast.length} (m by kind beach/hard/mole: ${[0, 1, 2].map((k) => Math.round(coast.filter((c) => c.k === k).reduce((s, c) => { let L = 0; for (let i = 2; i < c.p.length; i += 2) L += Math.hypot(c.p[i] - c.p[i - 2], c.p[i + 1] - c.p[i - 1]); return s + L; }, 0))).join('/')}), roundabouts ${roundabouts.length}, rivers ${rivers.length}, sports ${sports.length}`);
 console.log('sea polys', sea.length, 'sea ring pts', sea.map((p) => p[0].length), 'land', land.length);
 console.log('areas', Object.fromEntries(Object.entries(areas).map(([k, v]) => [k, v.length])));
 console.log('spawn', spawn, 'bounds', out.bounds);

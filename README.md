@@ -67,9 +67,19 @@ everything to local metres around the CBD (−33.3267, 115.6370), rounds to
 
 - turns the coastline (a line in OSM, land on its left) into sea polygons by
   clipping it to a box and closing it along the box edge on the sea side;
+- classifies each stretch of coastline as beach (mapped `natural=beach/sand`
+  nearby, or open ocean: rays cast seaward reach 2.5 km without meeting
+  land), sheltered shore, or breakwater / harbour wall (land under 70 m
+  thick); only beaches get sand, the others a rock edge in the game;
 - assembles multipolygon relations (e.g. Leschenault Estuary) into rings;
-- estimates road widths from `width` / `lanes` / road class and marks
-  junction vertices so road markings stop at intersections;
+- estimates road widths from `width` / `lanes` / road class, keeps `lanes`
+  for lane markings, and marks junction vertices (the game builds junction
+  plates, give-way lines and marking gaps from them);
+- joins `junction=roundabout` ways into rings and stores each as a centre and
+  radius profile, drawn as a smooth annulus with a round island;
+- keeps rivers (`waterway=river/canal` centrelines), railway bridges,
+  harbour basins (for quay edges) and the orientation / size of sports
+  pitches (oval, wicket, court and field markings);
 - picks building heights from `height` / `building:levels`, otherwise from
   the building type;
 - drops the few buildings that a road centreline passes through, so roads

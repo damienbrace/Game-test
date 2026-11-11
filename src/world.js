@@ -14,19 +14,25 @@ export const TILE = 500;
 // (inside one tile mesh triangles render in index order and tiles never
 // overlap because every triangle is clipped to its tile). No z-fighting.
 const L = {
-  coastSand: 0, sea: 1, sand: 2, grass: 3, park: 4, wood: 5, pitch: 6, water: 7, land: 8,
-  parking: 9, rail: 10, pier: 11, path: 12, kerb: 13, asphalt: 14, marking: 15,
+  coastSand: 0, sea: 1, shallows: 2, coastEdge: 3, sand: 4, grass: 5, park: 6, wood: 7, pitch: 8, water: 9, land: 10,
+  waterEdge: 11, shadow: 12, parking: 13, court: 14, pitchMark: 15, rail: 16, pier: 17, path: 18, kerb: 19, asphalt: 20,
+  island: 21, marking: 22, bridgeDeck: 23, bridgeAsphalt: 24, bridgeMarking: 25,
 };
-const NLAYERS = 16;
+const NLAYERS = 26;
 
 const col = (hex) => new THREE.Color(hex); // sRGB hex -> linear working colour
 const C = {
   ground: col(0xb3bf86), sea: col(0x2f84b2), water: col(0x2f84b2), sand: col(0xe6d6a4),
+  shallows: col(0x3f9cbd), foam: col(0xd9ebe8), rock: col(0x7b766d), rockLight: col(0xb0aa9e),
   grass: col(0x9cc46a), park: col(0x86b85c), wood: col(0x5f9445), pitch: col(0x77c25a),
   parking: col(0x8d9094), rail: col(0x75685d), railSteel: col(0x3c3c40), pier: col(0x9a7652),
   path: col(0xcfc6b0), kerb: col(0xc3c2ba), asphalt: [col(0x45484e), col(0x4a4d53), col(0x4e5157), col(0x53565b), col(0x585b60), col(0x5c5f63), col(0x66686b), col(0x8b7a62)],
-  white: col(0xf0f0ea), yellow: col(0xe8c34a),
+  white: col(0xf0f0ea), yellow: col(0xe8c34a), island: col(0x8fbf62), deck: col(0xb4b1a8),
+  bridgeShadow: col(0x1f5f85), parapet: col(0xe0ddd4), railing: col(0x9b8468), steel: col(0xb9bec2),
+  cricket: col(0xcdb98a), court: col(0x4d7f8f), post: col(0xf4f4f0), apron: col(0xa98270),
 };
+// map an asphalt colour index from a road (unpaved roads are brown gravel)
+const asphaltOf = (r) => (r.u ? C.asphalt[7] : C.asphalt[Math.min(r.c, 6)]);
 
 // Building geometry, palettes and facade textures live in buildings.js.
 
@@ -164,38 +170,38 @@ export class World {
     }
   }
 
+  // caps: true/false, or [startCap, endCap]
   ribbon(layer, p, width, color, caps = true) {
     const n = p.length / 2;
     if (n < 2) return;
     const hw = width / 2;
-    const L = [], R = [];
-    for (let i = 0; i < n; i++) {
-      const x = p[2 * i], y = p[2 * i + 1];
-      let nx = 0, ny = 0;
-      let d0x = 0, d0y = 0, d1x = 0, d1y = 0;
-      if (i > 0) { d0x = x - p[2 * i - 2]; d0y = y - p[2 * i - 1]; const l = Math.hypot(d0x, d0y) || 1; d0x /= l; d0y /= l; }
-      if (i < n - 1) { d1x = p[2 * i + 2] - x; d1y = p[2 * i + 3] - y; const l = Math.hypot(d1x, d1y) || 1; d1x /= l; d1y /= l; }
-      if (i === 0) { d0x = d1x; d0y = d1y; }
-      if (i === n - 1) { d1x = d0x; d1y = d0y; }
-      // left normals
-      const n0x = -d0y, n0y = d0x, n1x = -d1y, n1y = d1x;
-      nx = n0x + n1x; ny = n0y + n1y;
-      const l = Math.hypot(nx, ny);
-      if (l < 1e-6) { nx = n1x; ny = n1y; } else { nx /= l; ny /= l; }
-      let s = 1 / Math.max(0.35, nx * n1x + ny * n1y);
-      s = Math.min(s, 2.5);
-      L.push(x + nx * hw * s, y + ny * hw * s);
-      R.push(x - nx * hw * s, y - ny * hw * s);
-    }
+    const L = offsetLine(p, hw), R = offsetLine(p, -hw);
     for (let i = 0; i < n - 1; i++) {
       const a = 2 * i, b = 2 * i + 2;
       this.flatTri(layer, L[a], L[a + 1], R[a], R[a + 1], R[b], R[b + 1], color);
       this.flatTri(layer, L[a], L[a + 1], R[b], R[b + 1], L[b], L[b + 1], color);
     }
-    if (caps) {
-      this.disc(layer, p[0], p[1], hw, color);
-      this.disc(layer, p[2 * n - 2], p[2 * n - 1], hw, color);
+    const c0 = Array.isArray(caps) ? caps[0] : caps, c1 = Array.isArray(caps) ? caps[1] : caps;
+    if (c0) this.disc(layer, p[0], p[1], hw, color, hw > 3 ? 14 : 10);
+    if (c1) this.disc(layer, p[2 * n - 2], p[2 * n - 1], hw, color, hw > 3 ? 14 : 10);
+  }
+
+  // filled ring between radii r0(i) and r1(i) around (x, y); rad(i) gives the
+  // centreline radius at angle 2*pi*i/seg
+  annulus(layer, x, y, seg, rad, d0, d1, color) {
+    for (let i = 0; i < seg; i++) {
+      const a0 = (i / seg) * Math.PI * 2, a1 = ((i + 1) / seg) * Math.PI * 2;
+      const ra = rad(i), rb = rad(i + 1);
+      const c0 = Math.cos(a0), s0 = Math.sin(a0), c1 = Math.cos(a1), s1 = Math.sin(a1);
+      const ia = Math.max(0, ra + d0), oa = ra + d1, ib = Math.max(0, rb + d0), ob = rb + d1;
+      this.flatTri(layer, x + c0 * ia, y + s0 * ia, x + c0 * oa, y + s0 * oa, x + c1 * ob, y + s1 * ob, color);
+      if (ia > 0.01 || ib > 0.01) this.flatTri(layer, x + c0 * ia, y + s0 * ia, x + c1 * ob, y + s1 * ob, x + c1 * ib, y + s1 * ib, color);
     }
+  }
+
+  // convex polygon from a point list [[x,y],...] (fan)
+  convex(layer, pts, color) {
+    for (let i = 1; i < pts.length - 1; i++) this.flatTri(layer, pts[0][0], pts[0][1], pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1], color);
   }
 
   // thin line (solid or dashed) offset sideways from a polyline, skipping
@@ -245,7 +251,8 @@ export class World {
 
   buildFlat() {
     const d = this.data;
-    for (const c of d.coast || []) this.ribbon(L.coastSand, c, 34, C.sand, false);
+    if (!this.raster) this.buildRaster(); // bridges ask the raster what is under them
+    this.buildCoast();
     for (const p of d.sea) this.polygon(L.sea, p, C.sea);
     const A = d.areas;
     for (const p of A.sand) this.polygon(L.sand, p, C.sand);
@@ -254,41 +261,454 @@ export class World {
     for (const p of A.wood) this.polygon(L.wood, p, C.wood);
     for (const p of A.pitch) this.polygon(L.pitch, p, C.pitch);
     for (const p of A.water) this.polygon(L.water, p, C.water);
+    for (const rv of d.rivers || []) this.ribbon(L.water, rv.p, rv.w, C.water);
     for (const p of A.land) this.polygon(L.land, p, C.ground);
+    // harbour / marina basins: rock-and-concrete quay edge inside the water
+    for (const q of d.quays || []) {
+      const ring = q.concat(q[0], q[1]);
+      this.ribbon(L.waterEdge, offsetLine(ring, 1.3), 2.6, C.rock, false);
+      this.ribbon(L.waterEdge, offsetLine(ring, -0.4), 0.8, C.rockLight, false);
+    }
     for (const p of A.parking) this.polygon(L.parking, p, C.parking);
     for (const p of A.pier) this.polygon(L.pier, p, C.pier);
-    for (const pl of d.piers) this.ribbon(L.pier, pl.p, pl.w, C.pier);
+    for (const pl of d.piers) {
+      this.ribbon(L.pier, pl.p, pl.w, C.pier, false);
+      // jetty handrails (visual only)
+      for (const side of [-1, 1]) this.railing(offsetLine(pl.p, side * (pl.w / 2 - 0.1)), 1.0, C.railing, 6);
+    }
     for (const r of d.rail) {
       this.ribbon(L.rail, r, 3, C.rail, false);
-      this.line(L.rail, r, 0.72, 0.12, Infinity, 0, [], C.railSteel);
-      this.line(L.rail, r, -0.72, 0.12, Infinity, 0, [], C.railSteel);
+      this.line(L.rail, offsetLine(r, 0.72), 0, 0.12, Infinity, 0, [], C.railSteel);
+      this.line(L.rail, offsetLine(r, -0.72), 0, 0.12, Infinity, 0, [], C.railSteel);
     }
-    for (const r of d.roads) {
-      if (r.c === 8) { this.ribbon(L.path, r.p, r.w, C.path); continue; }
-      const asphalt = r.u ? C.asphalt[7] : C.asphalt[r.c];
-      if (r.c <= 5) this.ribbon(L.kerb, r.p, r.w + (r.c <= 3 ? 1.2 : 0.8), C.kerb);
-      this.ribbon(L.asphalt, r.p, r.w, asphalt);
-      if (r.c <= 3 && !r.u) this.markings(r);
+    // railway bridges: deck, track and handrails above whatever they cross
+    for (const r of d.railBridges || []) {
+      this.ribbon(L.bridgeDeck, r, 4.6, C.deck, false);
+      this.ribbon(L.bridgeAsphalt, r, 3, C.rail, false);
+      this.line(L.bridgeMarking, offsetLine(r, 0.72), 0, 0.12, Infinity, 0, [], C.railSteel);
+      this.line(L.bridgeMarking, offsetLine(r, -0.72), 0, 0.12, Infinity, 0, [], C.railSteel);
+      const t = trimLine(r, 0.3);
+      if (t) for (const side of [-1, 1]) this.railing(offsetLine(t, side * 2.15), 1.0, C.steel, 4);
+    }
+    this.buildSports();
+    this.buildRoads();
+  }
+
+  // ------------------------------------------------------------ coast
+  // Beach runs get a sand strip (under the sea, so only the land half shows)
+  // plus shallows and a foam line; sheltered shores and breakwaters get a
+  // rock edge over the water instead.
+  buildCoast() {
+    for (const c of this.data.coast || []) {
+      const p = c.p;
+      if (c.k === 0) {
+        this.ribbon(L.coastSand, p, 40, C.sand, false);
+        // sea is on the right of the coastline direction
+        this.ribbon(L.shallows, offsetLine(p, -5), 10, C.shallows, false);
+        this.ribbon(L.coastEdge, offsetLine(p, -0.6), 1.2, C.foam, false);
+      } else if (c.k === 1) {
+        this.ribbon(L.coastEdge, offsetLine(p, -0.6), 3.4, C.rock, false);
+        this.ribbon(L.coastEdge, offsetLine(p, 0.9), 1.2, C.rockLight, false);
+      } else {
+        // breakwater / harbour wall: wide rock armour on both faces
+        this.ribbon(L.coastEdge, offsetLine(p, -1.5), 5, C.rock, false);
+        this.ribbon(L.coastEdge, offsetLine(p, 3), 4, C.rockLight, false);
+      }
     }
   }
 
-  markings(r) {
-    const p = r.p;
-    const n = p.length / 2;
-    // arc length of each vertex, to trim markings around junctions
-    const arc = [0];
-    for (let i = 1; i < n; i++) arc.push(arc[i - 1] + Math.hypot(p[2 * i] - p[2 * i - 2], p[2 * i + 1] - p[2 * i - 1]));
-    const total = arc[n - 1];
-    const trimR = 7;
-    const skip = (r.j || []).map((i) => [arc[i] - trimR, arc[i] + trimR]);
-    skip.push([-1, 2], [total - 2, total + 1]);
-    if (!r.o && !r.r) this.line(L.marking, p, 0, 0.16, 3, 6, skip, C.white);
-    if (r.c <= 2 && r.w >= 6) {
-      const skipEdge = (r.j || []).map((i) => [arc[i] - trimR - 3, arc[i] + trimR + 3]);
-      const off = r.w / 2 - 0.45;
-      this.line(L.marking, p, off, 0.13, Infinity, 0, skipEdge, C.white);
-      this.line(L.marking, p, -off, 0.13, Infinity, 0, skipEdge, C.white);
+  // ------------------------------------------------------------ sports grounds
+  buildSports() {
+    for (const s of this.data.sports || []) {
+      const ux = Math.cos(s.a), uy = Math.sin(s.a), vx = -uy, vy = ux;
+      const P = (u, v) => [s.x + ux * u + vx * v, s.y + uy * u + vy * v];
+      const hl = s.L / 2, hw = s.W / 2;
+      const W = C.white, lw = 0.2;
+      const poly = (pts, closed = true) => {
+        const f = [];
+        for (const q of pts) f.push(q[0], q[1]);
+        if (closed) f.push(pts[0][0], pts[0][1]);
+        this.line(L.pitchMark, f, 0, lw, Infinity, 0, [], W);
+      };
+      const rect = (u0, v0, u1, v1) => poly([P(u0, v0), P(u1, v0), P(u1, v1), P(u0, v1)]);
+      const circle = (cu, cv, r, a0 = 0, a1 = Math.PI * 2, keep = null) => {
+        const n = Math.max(12, Math.ceil(r * 1.2));
+        let run = [];
+        const flush = () => { if (run.length > 1) poly(run, false); run = []; };
+        for (let i = 0; i <= n; i++) {
+          const a = a0 + (a1 - a0) * (i / n);
+          const u = cu + Math.cos(a) * r, v = cv + Math.sin(a) * r;
+          if (keep && !keep(u, v)) { flush(); continue; }
+          run.push(P(u, v));
+        }
+        flush();
+      };
+      if (s.s === 'afl' || (s.s === 'cricket' && s.L > 90)) {
+        // oval: boundary line, then the code-specific markings
+        const ra = hl - 3, rb = hw - 3;
+        const ell = [];
+        for (let i = 0; i < 64; i++) { const a = (i / 64) * Math.PI * 2; ell.push(P(Math.cos(a) * ra, Math.sin(a) * rb)); }
+        poly(ell);
+        if (s.s === 'afl' && ra > 50) {
+          rect(-25, -25, 25, 25);
+          circle(0, 0, 5);
+          circle(0, 0, 1.5);
+          const inside = (u, v) => (u * u) / (ra * ra) + (v * v) / (rb * rb) < 0.995;
+          for (const e of [-1, 1]) {
+            const g = e * ra;
+            circle(g, 0, 50, e > 0 ? Math.PI / 2 : -Math.PI / 2, e > 0 ? Math.PI * 1.5 : Math.PI / 2, inside);
+            rect(g, -3.2, g - e * 9, 3.2);
+            // goal and behind posts
+            for (const [v, h] of [[-3.2, 6.5], [3.2, 6.5], [-9.6, 3.5], [9.6, 3.5]]) {
+              const q = P(g, v);
+              this.post3(q[0], q[1], 0.12, h, C.post);
+            }
+          }
+        }
+        if (s.s === 'cricket' || s.L > 120) {
+          // centre wicket strip
+          const strip = [P(-10.1, -1.6), P(10.1, -1.6), P(10.1, 1.6), P(-10.1, 1.6)];
+          this.convex(L.court, strip, C.cricket);
+        }
+      } else if (s.s === 'cricket') {
+        // a small cricket pitch polygon is the wicket strip itself
+        this.convex(L.court, [P(-hl, -hw), P(hl, -hw), P(hl, hw), P(-hl, hw)], C.cricket);
+      } else if (s.s === 'tennis' || s.s === 'basketball' || s.s === 'netball') {
+        this.convex(L.court, [P(-hl, -hw), P(hl, -hw), P(hl, hw), P(-hl, hw)], C.court);
+        const m = Math.min(1.5, hw * 0.12);
+        rect(-hl + m, -hw + m, hl - m, hw - m);
+        poly([P(0, -hw + m), P(0, hw - m)], false);
+        if (s.s !== 'tennis' && hl > 8) circle(0, 0, Math.min(1.8, hw * 0.25));
+      } else if (hl > 20) {
+        // soccer / rugby / hockey rectangle
+        const m = 2;
+        const a = hl - m, b = hw - m;
+        rect(-a, -b, a, b);
+        poly([P(0, -b), P(0, b)], false);
+        circle(0, 0, Math.min(9.15, b * 0.3));
+        if (s.s === 'soccer' && b > 22) {
+          for (const e of [-1, 1]) rect(e * a, -20.15, e * (a - 16.5), 20.15);
+        }
+        if (s.s === 'rugby') for (const e of [-1, 1]) poly([P(e * (a - 22), -b), P(e * (a - 22), b)], false);
+      }
     }
+  }
+
+  // ------------------------------------------------------------ roads
+  // Junction-aware road drawing:
+  //  - every node where 3+ road arms meet gets a convex "junction plate"
+  //    (asphalt, with a matching kerb plate below), so strips never show
+  //    caps, kerbs or bulges inside the junction;
+  //  - markings stop at the plate; minor approaches get give-way lines;
+  //  - roundabouts are drawn as smooth annuli with a round kerbed island;
+  //  - bridges are drawn on top as a deck with parapets.
+  buildRoads() {
+    const d = this.data;
+    const roads = d.roads;
+    const key = (x, y) => x + ',' + y;
+    // arc lengths
+    const arcs = roads.map((r) => {
+      const p = r.p, n = p.length / 2, a = [0];
+      for (let i = 1; i < n; i++) a.push(a[i - 1] + Math.hypot(p[2 * i] - p[2 * i - 2], p[2 * i + 1] - p[2 * i - 1]));
+      return a;
+    });
+    // junction nodes -> arms (an arm leaves the node along one road, in one
+    // direction; len is the distance to the next junction or the road end)
+    const nodes = new Map();
+    roads.forEach((r, ri) => {
+      if (r.c >= 8 || !r.j) return;
+      const arc = arcs[ri], n = r.p.length / 2;
+      const jset = r.j;
+      for (let k = 0; k < jset.length; k++) {
+        const i = jset[k];
+        const x = r.p[2 * i], y = r.p[2 * i + 1];
+        const kk = key(x, y);
+        let nd = nodes.get(kk);
+        if (!nd) { nd = { x, y, arms: [] }; nodes.set(kk, nd); }
+        const prevJ = k > 0 ? jset[k - 1] : 0, nextJ = k < jset.length - 1 ? jset[k + 1] : n - 1;
+        if (i > 0) nd.arms.push({ r, ri, i, dir: -1, len: arc[i] - arc[prevJ] || arc[i], other: k > 0 ? prevJ : -1 });
+        if (i < n - 1) nd.arms.push({ r, ri, i, dir: 1, len: arc[nextJ] - arc[i] || arc[n - 1] - arc[i], other: k < jset.length - 1 ? nextJ : -1 });
+      }
+    });
+    const skips = roads.map(() => []);
+    const edgeSkips = roads.map(() => []);
+    const noCap = roads.map(() => [false, false]);
+    const giveWays = [];
+    const plates = [];
+    for (const nd of nodes.values()) {
+      const arms = nd.arms;
+      if (arms.length < 3) continue;
+      const ring = arms.find((a) => a.r.r === 2);
+      let minC = 9, maxHw = 0;
+      for (const a of arms) { minC = Math.min(minC, a.r.c); maxHw = Math.max(maxHw, a.r.w / 2); }
+      for (const a of arms) {
+        const n = a.r.p.length / 2;
+        if (a.i === 0) noCap[a.ri][0] = true;
+        if (a.i === n - 1) noCap[a.ri][1] = true;
+      }
+      if (ring) {
+        const rhw = ring.r.w / 2;
+        for (const a of arms) {
+          if (a.r.r === 2) continue;
+          const da = Math.min(rhw + 0.9, a.len * 0.6);
+          a.da = da;
+          const at = arcs[a.ri][a.i];
+          const iv = a.dir > 0 ? [at - 0.5, at + da + 1.5] : [at - da - 1.5, at + 0.5];
+          skips[a.ri].push(iv);
+          edgeSkips[a.ri].push([iv[0] - 1, iv[1] + 1]);
+          if (a.r.c < 6) giveWays.push(a);
+        }
+        continue;
+      }
+      const dPlate = maxHw + 2.2;
+      const pts = [[nd.x, nd.y]], kpts = [];
+      let plateRoad = arms[0].r;
+      for (const a of arms) {
+        if (a.r.c < plateRoad.c || (a.r.c === plateRoad.c && a.r.w > plateRoad.w)) plateRoad = a.r;
+        const da = Math.max(0.5, Math.min(dPlate, a.len * 0.5));
+        a.da = da;
+        const hw = a.r.w / 2;
+        const q = pointAlong(a.r.p, arcs[a.ri], a.i, a.dir, da);
+        const nx = -q.ty, ny = q.tx;
+        pts.push([q.x + nx * hw, q.y + ny * hw], [q.x - nx * hw, q.y - ny * hw]);
+        const kw = hw + (a.r.c <= 3 ? 0.6 : a.r.c <= 5 ? 0.4 : 0);
+        kpts.push([q.x + nx * kw, q.y + ny * kw], [q.x - nx * kw, q.y - ny * kw]);
+        // the start of the strip at the node
+        const q0 = pointAlong(a.r.p, arcs[a.ri], a.i, a.dir, 0);
+        pts.push([nd.x - q0.ty * hw, nd.y + q0.tx * hw], [nd.x + q0.ty * hw, nd.y - q0.tx * hw]);
+        const at = arcs[a.ri][a.i];
+        const iv = a.dir > 0 ? [at - 0.5, at + da + 1.2] : [at - da - 1.2, at + 0.5];
+        skips[a.ri].push(iv);
+        edgeSkips[a.ri].push([iv[0] - 1.5, iv[1] + 1.5]);
+        if (a.r.c > minC && a.r.c < 6) giveWays.push(a);
+      }
+      nd.plate = { pts, kpts, road: plateRoad, kerb: arms.some((a) => a.r.c <= 5), bridge: arms.every((a) => a.r.b) };
+      plates.push(nd);
+    }
+    // Junctions joined by a short arm (dual carriageway crossings, staggered
+    // T-junctions) share one plate, so no slivers of verge are left between
+    // them. Clusters wider than 34 m fall back to separate plates.
+    const parent = new Map();
+    const find = (k) => { while (parent.get(k) !== k) { parent.set(k, parent.get(parent.get(k))); k = parent.get(k); } return k; };
+    for (const nd of plates) parent.set(key(nd.x, nd.y), key(nd.x, nd.y));
+    for (const nd of plates) {
+      for (const a of nd.arms) {
+        if (a.other < 0 || a.len > 24) continue;
+        const ok = key(a.r.p[2 * a.other], a.r.p[2 * a.other + 1]);
+        if (!parent.has(ok)) continue;
+        const ra = find(key(nd.x, nd.y)), rb = find(ok);
+        if (ra !== rb) parent.set(ra, rb);
+      }
+    }
+    const groups = new Map();
+    for (const nd of plates) {
+      const g = find(key(nd.x, nd.y));
+      if (!groups.has(g)) groups.set(g, []);
+      groups.get(g).push(nd);
+    }
+    const plateList = [];
+    const addPlate = (list) => {
+      let pts = [], kpts = [], road = list[0].plate.road;
+      for (const nd of list) {
+        pts = pts.concat(nd.plate.pts); kpts = kpts.concat(nd.plate.kpts);
+        const r = nd.plate.road;
+        if (r.c < road.c || (r.c === road.c && r.w > road.w)) road = r;
+      }
+      plateList.push({ pts: convexHull(pts), kpts: list.some((nd) => nd.plate.kerb) ? convexHull(pts.concat(kpts)) : null, color: asphaltOf(road), bridge: list.every((nd) => nd.plate.bridge) });
+    };
+    for (const list of groups.values()) {
+      if (list.length > 1) {
+        let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+        for (const nd of list) for (const q of nd.plate.pts) { x0 = Math.min(x0, q[0]); x1 = Math.max(x1, q[0]); y0 = Math.min(y0, q[1]); y1 = Math.max(y1, q[1]); }
+        if (Math.hypot(x1 - x0, y1 - y0) <= 34) { addPlate(list); continue; }
+      }
+      for (const nd of list) addPlate([nd]);
+    }
+
+    // strips
+    roads.forEach((r, ri) => {
+      if (r.r === 2 || r.b) return; // roundabouts and bridges are drawn below
+      const caps = [!noCap[ri][0], !noCap[ri][1]];
+      if (r.c === 8) { this.ribbon(L.path, r.p, r.w, C.path, caps); return; }
+      if (r.c <= 5) this.ribbon(L.kerb, r.p, r.w + (r.c <= 3 ? 1.2 : 0.8), C.kerb, caps);
+      this.ribbon(L.asphalt, r.p, r.w, asphaltOf(r), caps);
+    });
+    // roundabouts
+    for (const rb of d.roundabouts || []) {
+      const N = rb.rr.length, SEG = Math.max(36, Math.min(96, Math.round(rb.rr.reduce((a, b) => a + b, 0) / N * 2)));
+      const rad = (i) => {
+        // periodic linear interpolation of the radius profile
+        const t = ((i % SEG) / SEG) * N, k = Math.floor(t), f = t - k;
+        return rb.rr[k % N] * (1 - f) + rb.rr[(k + 1) % N] * f;
+      };
+      const hw = rb.w / 2;
+      const asph = rb.c <= 6 ? C.asphalt[rb.c] : C.asphalt[6];
+      if (rb.c <= 5) this.annulus(L.kerb, rb.x, rb.y, SEG, rad, -hw - 0.1, hw + 0.7, C.kerb);
+      this.annulus(L.asphalt, rb.x, rb.y, SEG, rad, -hw, hw, asph);
+      // island: kerb rim, a mountable apron and the planted centre
+      this.annulus(L.island, rb.x, rb.y, SEG, rad, -hw - 0.5, -hw, C.kerb);
+      const apron = Math.min(1.2, Math.max(0, (rad(0) - hw - 0.5) * 0.2));
+      if (apron > 0.3) this.annulus(L.island, rb.x, rb.y, SEG, rad, -hw - 0.5 - apron, -hw - 0.5, C.apron);
+      this.annulus(L.island, rb.x, rb.y, SEG, rad, -1e4, -hw - 0.5 - (apron > 0.3 ? apron : 0), C.island);
+      if (rb.l >= 2) {
+        const f = [];
+        for (let i = 0; i <= SEG; i++) { const a = (i / SEG) * Math.PI * 2; f.push(rb.x + Math.cos(a) * rad(i), rb.y + Math.sin(a) * rad(i)); }
+        this.line(L.marking, f, 0, 0.13, 3, 4, [], C.white);
+      }
+    }
+    // junction plates
+    for (const pl of plateList) {
+      if (pl.kpts) this.convex(L.kerb, pl.kpts, C.kerb);
+      this.convex(pl.bridge ? L.bridgeAsphalt : L.asphalt, pl.pts, pl.color);
+    }
+    // markings
+    roads.forEach((r, ri) => {
+      if (r.c > 3 || r.u || r.r === 2) return;
+      this.markings(r, arcs[ri], skips[ri], edgeSkips[ri], r.b ? L.bridgeMarking : L.marking);
+    });
+    for (const a of giveWays) this.giveWay(a, arcs[a.ri]);
+    // bridges
+    roads.forEach((r, ri) => { if (r.b && r.r !== 2) this.bridge(r, [!noCap[ri][0], !noCap[ri][1]]); });
+  }
+
+  // Lane lines: dashed centre line on two-way roads, lane dividers on
+  // multi-lane roads (from lanes=* or the width of one-way carriageways),
+  // solid edge lines on arterials.
+  markings(r, arc, skip, skipEdge, layer) {
+    const p = r.p;
+    const total = arc[arc.length - 1];
+    const ends = [[-1, 1.5], [total - 1.5, total + 1]];
+    skip = skip.concat(ends);
+    skipEdge = skipEdge.concat(ends);
+    const hw = r.w / 2;
+    let lanes = r.l || 0;
+    if (r.o) {
+      if (!lanes) lanes = r.w >= 6.4 ? Math.round(r.w / 3.3) : 1;
+      for (let k = 1; k < lanes; k++) this.line(layer, offsetLine(p, -hw + (r.w * k) / lanes), 0, 0.14, 3, 6, skip, C.white);
+    } else if (r.r !== 1) {
+      if (lanes >= 4) {
+        this.line(layer, offsetLine(p, 0.12), 0, 0.12, Infinity, 0, skip, C.white);
+        this.line(layer, offsetLine(p, -0.12), 0, 0.12, Infinity, 0, skip, C.white);
+        const per = Math.floor(lanes / 2);
+        for (let k = 1; k < per; k++) for (const sd of [-1, 1]) this.line(layer, offsetLine(p, sd * (hw * k) / per), 0, 0.14, 3, 6, skip, C.white);
+      } else this.line(layer, p, 0, 0.16, 3, 6, skip, C.white);
+    }
+    if ((r.c <= 2 && r.w >= 6) || (r.o && r.c <= 3 && r.w >= 5)) {
+      const off = hw - 0.45;
+      this.line(layer, offsetLine(p, off), 0, 0.13, Infinity, 0, skipEdge, C.white);
+      this.line(layer, offsetLine(p, -off), 0, 0.13, Infinity, 0, skipEdge, C.white);
+    }
+  }
+
+  // dashed give-way line across the approach lane(s) of a minor arm
+  giveWay(a, arc) {
+    const r = a.r;
+    if (r.o && a.dir > 0) return; // one-way leaving the junction
+    const q = pointAlong(r.p, arc, a.i, a.dir, a.da + 0.4);
+    if (q.s < a.da + 0.3) return; // arm too short
+    const hw = r.w / 2;
+    // approaching traffic travels along -t; its left is (t.y, -t.x)
+    const lx = q.ty, ly = -q.tx;
+    const o0 = r.o ? -hw + 0.3 : 0.15, o1 = hw - 0.3;
+    if (o1 - o0 < 1) return;
+    this.line(r.b ? L.bridgeMarking : L.marking, [q.x + lx * o0, q.y + ly * o0, q.x + lx * o1, q.y + ly * o1], 0, 0.35, 0.6, 0.45, [], C.white);
+  }
+
+  // bridge deck with parapets; drivable bridges get parapet collision
+  bridge(r, caps) {
+    const hw = r.w / 2;
+    const foot = r.c === 8;
+    const edge = foot ? 0.25 : 0.6;
+    // shadow on the water beside the deck (the sun is in the west / south-west)
+    if (!foot) {
+      const sx = 0.79 * 4, sy = 0.61 * 4;
+      const p = r.p, n = p.length / 2;
+      let run = [];
+      const flush = () => { if (run.length >= 4) this.ribbon(L.shadow, run, r.w + 2 * edge, C.bridgeShadow, false); run = []; };
+      for (let i = 0; i < n - 1; i++) {
+        const ax = p[2 * i], ay = p[2 * i + 1], bx = p[2 * i + 2], by = p[2 * i + 3];
+        const len = Math.hypot(bx - ax, by - ay), steps = Math.max(1, Math.ceil(len / 2));
+        for (let k = 0; k <= steps; k++) {
+          if (k === 0 && i > 0) continue;
+          const x = ax + ((bx - ax) * k) / steps + sx, y = ay + ((by - ay) * k) / steps + sy;
+          if (this.rasterCode(x, y) === 1) run.push(x, y); else flush();
+        }
+      }
+      flush();
+    }
+    this.ribbon(L.bridgeDeck, r.p, r.w + 2 * edge, foot ? C.pier : C.deck, false);
+    this.ribbon(L.bridgeAsphalt, r.p, r.w, foot ? C.path : asphaltOf(r), caps);
+    // parapets, kept a little short of the ends so approaches stay clear
+    const p = trimLine(r.p, 0.4);
+    if (!p) return;
+    for (const side of [-1, 1]) {
+      const line = offsetLine(p, side * (hw + edge * 0.55));
+      if (foot) this.railing(line, 1.0, C.railing, 4);
+      else {
+        // concrete upstand with a steel rail on posts above it
+        this.wall3(line, 0.32, 0.45, C.parapet);
+        this.railing(line, 1.0, C.steel, 2.4, 0.45);
+        const cl = offsetLine(p, side * (hw + 0.3));
+        for (let i = 0; i < cl.length - 2; i += 2) this.addColSeg(cl[i], cl[i + 1], cl[i + 2], cl[i + 3]);
+      }
+    }
+  }
+
+  // posts every `spacing` m plus a top rail along a polyline, from height h0
+  railing(p, h, color, spacing, h0 = 0) {
+    const n = p.length / 2;
+    let acc = spacing;
+    for (let i = 0; i < n - 1; i++) {
+      const ax = p[2 * i], ay = p[2 * i + 1], bx = p[2 * i + 2], by = p[2 * i + 3];
+      const len = Math.hypot(bx - ax, by - ay);
+      let s = spacing - acc;
+      for (; s <= len; s += spacing) this.post3(ax + ((bx - ax) * s) / len, ay + ((by - ay) * s) / len, 0.05, h, color, h0);
+      acc = len - (s - spacing);
+    }
+    this.post3(p[2 * n - 2], p[2 * n - 1], 0.05, h, color, h0);
+    this.wall3(p, 0.09, h, color, h - 0.1);
+  }
+
+  // wall along a polyline (3D object mesh), thickness t, from height h0 to h
+  wall3(p, t, h, color, h0 = 0) {
+    const n = p.length / 2;
+    const top = color.clone().multiplyScalar(1.08), low = h0 > 0 ? color : color.clone().multiplyScalar(0.8);
+    for (let i = 0; i < n - 1; i++) {
+      const ax = p[2 * i], ay = p[2 * i + 1], bx = p[2 * i + 2], by = p[2 * i + 3];
+      const len = Math.hypot(bx - ax, by - ay);
+      if (len < 0.05) continue;
+      const nx = -(by - ay) / len * t / 2, ny = (bx - ax) / len * t / 2;
+      const o = this.obj((ax + bx) / 2, (ay + by) / 2);
+      const A = (sx, hh) => [ax + nx * sx, hh, -(ay + ny * sx)], B = (sx, hh) => [bx + nx * sx, hh, -(by + ny * sx)];
+      const nrmL = [nx / (t / 2), 0, -ny / (t / 2)], nrmR = [-nrmL[0], 0, -nrmL[2]];
+      this.tri3(o, A(1, h0), B(1, h0), B(1, h), nrmL, [low, low, color]);
+      this.tri3(o, A(1, h0), B(1, h), A(1, h), nrmL, [low, color, color]);
+      this.tri3(o, A(-1, h0), B(-1, h0), B(-1, h), nrmR, [low, low, color]);
+      this.tri3(o, A(-1, h0), B(-1, h), A(-1, h), nrmR, [low, color, color]);
+      this.tri3(o, A(1, h), B(1, h), B(-1, h), [0, 1, 0], top);
+      this.tri3(o, A(1, h), B(-1, h), A(-1, h), [0, 1, 0], top);
+    }
+  }
+
+  // thin square post (3D)
+  post3(x, y, r, h, color, h0 = 0) {
+    const o = this.obj(x, y);
+    const c = [[r, r], [-r, r], [-r, -r], [r, -r]];
+    for (let i = 0; i < 4; i++) {
+      const a = c[i], b = c[(i + 1) % 4];
+      const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2, l = Math.hypot(mx, my);
+      const nrm = [mx / l, 0, -my / l];
+      const A0 = [x + a[0], h0, -(y + a[1])], B0 = [x + b[0], h0, -(y + b[1])], A1 = [x + a[0], h, -(y + a[1])], B1 = [x + b[0], h, -(y + b[1])];
+      this.tri3(o, A0, B0, B1, nrm, color);
+      this.tri3(o, A0, B1, A1, nrm, color);
+    }
+  }
+
+  rasterCode(x, y) {
+    const R = this.raster;
+    const u = Math.floor((x - R.x0) / R.mpp), v = Math.floor((R.y1 - y) / R.mpp);
+    if (u < 0 || v < 0 || u >= R.N || v >= R.N) return 1;
+    return R.codes[v * R.N + u];
   }
 
   // ------------------------------------------------------------ 3D objects
@@ -489,6 +909,7 @@ export class World {
 
   // ------------------------------------------------------------ surface raster
   buildRaster() {
+    if (this.raster) return; // already built (buildFlat needs it first)
     const [x0, y0, x1, y1] = this.bounds;
     const N = 2048;
     const mpp = Math.max(x1 - x0, y1 - y0) / N;
@@ -511,11 +932,14 @@ export class World {
     // channel codes: R = water, G = sand, B = paved, G=96 = rough (wood)
     fillPolys(d.areas.wood, 'rgb(0,96,0)');
     g.strokeStyle = 'rgb(0,255,0)';
-    g.lineWidth = 34 / mpp;
-    for (const c of d.coast || []) { g.beginPath(); pathLine(g, c, tr); g.stroke(); }
+    g.lineWidth = 40 / mpp;
+    for (const c of d.coast || []) if (c.k === 0) { g.beginPath(); pathLine(g, c.p, tr); g.stroke(); }
     fillPolys(d.sea, 'rgb(255,0,0)');
     fillPolys(d.areas.sand, 'rgb(0,255,0)');
     fillPolys(d.areas.water, 'rgb(255,0,0)');
+    g.strokeStyle = 'rgb(255,0,0)';
+    g.lineCap = 'round';
+    for (const rv of d.rivers || []) { g.lineWidth = rv.w / mpp; g.beginPath(); pathLine(g, rv.p, tr); g.stroke(); }
     fillPolys(d.areas.land, 'rgb(0,0,0)');
     fillPolys(d.areas.parking, 'rgb(0,0,255)');
     fillPolys(d.areas.pier, 'rgb(0,0,255)');
@@ -559,13 +983,17 @@ export class World {
     g.fillStyle = '#c9cfa9';
     g.fillRect(0, 0, N, N);
     g.strokeStyle = '#eadfb4';
-    g.lineWidth = 30 / mpp;
-    for (const c of d.coast || []) { g.beginPath(); pathLine(g, c, tr); g.stroke(); }
+    g.lineWidth = 34 / mpp;
+    for (const c of d.coast || []) if (c.k === 0) { g.beginPath(); pathLine(g, c.p, tr); g.stroke(); }
     fill(d.sea, '#4f9ccc');
     fill(d.areas.sand, '#eadfb4');
     fill([...d.areas.grass, ...d.areas.park, ...d.areas.pitch], '#a9d08a');
     fill(d.areas.wood, '#86b86f');
     fill(d.areas.water, '#4f9ccc');
+    g.strokeStyle = '#4f9ccc';
+    g.lineCap = 'round';
+    for (const rv of d.rivers || []) { g.lineWidth = rv.w / mpp; g.beginPath(); pathLine(g, rv.p, tr); g.stroke(); }
+    fill(d.areas.pier, '#b39a80');
     fill(d.areas.parking, '#bfc0bf');
     g.fillStyle = '#b3aca2';
     for (const b of d.buildings) { g.beginPath(); pathRing(g, b.p, tr); g.fill(); }
@@ -587,7 +1015,9 @@ export class World {
 
   // ------------------------------------------------------------ meshes
   finishMeshes() {
-    const flatMat = new THREE.MeshBasicMaterial({ vertexColors: true, depthWrite: false, side: THREE.DoubleSide });
+    const flatMat = makeFlatMaterial();
+    const uTime = flatMat.userData.uTime;
+    const tickWater = () => { uTime.value = (performance.now() / 1000) % 2000; };
     const objMat = new THREE.MeshLambertMaterial({ vertexColors: true });
     this.flatMaterial = flatMat;
     this.objMaterial = objMat;
@@ -611,6 +1041,7 @@ export class World {
       geo.computeBoundingSphere();
       const m = new THREE.Mesh(geo, flatMat);
       m.renderOrder = -5;
+      m.onBeforeRender = tickWater;
       m.matrixAutoUpdate = false;
       this.group.add(m);
       this.stats.flatTris += n;
@@ -636,6 +1067,111 @@ export class World {
     this.ground = g;
     this.group.add(g);
   }
+}
+
+// Material for the flat ground layers. Water is recognised by its strongly
+// blue vertex colour and gets a cheap animated ripple / colour drift (a few
+// sines per fragment, water pixels only).
+function makeFlatMaterial() {
+  const mat = new THREE.MeshBasicMaterial({ vertexColors: true, depthWrite: false, side: THREE.DoubleSide });
+  const uTime = { value: 0 };
+  mat.userData.uTime = uTime;
+  mat.onBeforeCompile = (sh) => {
+    sh.uniforms.uTime = uTime;
+    sh.vertexShader = sh.vertexShader
+      .replace('#include <common>', '#include <common>\nvarying vec2 vWP;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvWP = position.xz;');
+    sh.fragmentShader = sh.fragmentShader
+      .replace('#include <common>', '#include <common>\nvarying vec2 vWP;\nuniform float uTime;')
+      .replace('#include <color_fragment>', [
+        '#include <color_fragment>',
+        '#ifdef USE_COLOR',
+        'if (vColor.b > vColor.g * 1.4 && vColor.b > vColor.r * 4.0) {',
+        '  vec2 p = vWP; float t = uTime;',
+        '  float big = 0.6 * sin(p.x * 0.0061 + 1.3) * sin(p.y * 0.0047 - 0.4) + 0.25 * sin(p.x * 0.0137 - p.y * 0.0081 + t * 0.05) + 0.2 * sin(p.x * 0.0029 + p.y * 0.0113 - t * 0.03);',
+        '  float near = 1.0 - smoothstep(40.0, 220.0, distance(cameraPosition.xz, p));',
+        '  float rip = sin(p.x * 0.21 + sin(p.y * 0.13) * 1.7 + t * 1.1) * sin(p.y * 0.17 - sin(p.x * 0.11) * 1.5 - t * 0.8);',
+        '  float glint = smoothstep(0.9, 1.0, rip) * 0.035 * near;',
+        '  diffuseColor.rgb *= 1.0 + 0.06 * big + 0.025 * rip * near;',
+        '  diffuseColor.rgb += vec3(glint * 0.8, glint, glint);',
+        '}',
+        '#endif',
+      ].join('\n'));
+  };
+  return mat;
+}
+
+// polyline (flat) shifted sideways by `off` (positive = left), with mitred
+// joins (miter limited so sharp bends do not spike)
+function offsetLine(p, off) {
+  const n = p.length / 2;
+  const out = new Array(p.length);
+  for (let i = 0; i < n; i++) {
+    const x = p[2 * i], y = p[2 * i + 1];
+    let d0x = 0, d0y = 0, d1x = 0, d1y = 0;
+    if (i > 0) { d0x = x - p[2 * i - 2]; d0y = y - p[2 * i - 1]; const l = Math.hypot(d0x, d0y) || 1; d0x /= l; d0y /= l; }
+    if (i < n - 1) { d1x = p[2 * i + 2] - x; d1y = p[2 * i + 3] - y; const l = Math.hypot(d1x, d1y) || 1; d1x /= l; d1y /= l; }
+    if (i === 0) { d0x = d1x; d0y = d1y; }
+    if (i === n - 1) { d1x = d0x; d1y = d0y; }
+    const n0x = -d0y, n0y = d0x, n1x = -d1y, n1y = d1x;
+    let nx = n0x + n1x, ny = n0y + n1y;
+    const l = Math.hypot(nx, ny);
+    if (l < 1e-6) { nx = n1x; ny = n1y; } else { nx /= l; ny /= l; }
+    const s = Math.min(2.5, 1 / Math.max(0.35, nx * n1x + ny * n1y));
+    out[2 * i] = x + nx * off * s;
+    out[2 * i + 1] = y + ny * off * s;
+  }
+  return out;
+}
+
+// point at arc distance `dist` from vertex i of polyline p, walking in
+// direction dir (+1 forward / -1 backward). t = unit walking direction,
+// s = distance actually walked (shorter if the line ends first)
+function pointAlong(p, arc, i, dir, dist) {
+  const n = p.length / 2;
+  const target = arc[i] + dir * dist;
+  let j = i;
+  for (;;) {
+    const k = j + dir;
+    if (k < 0 || k >= n) break;
+    if (dir > 0 ? arc[k] >= target : arc[k] <= target) {
+      const segLen = Math.abs(arc[k] - arc[j]) || 1e-9;
+      const f = Math.abs(target - arc[j]) / segLen;
+      const dx = p[2 * k] - p[2 * j], dy = p[2 * k + 1] - p[2 * j + 1];
+      return { x: p[2 * j] + dx * f, y: p[2 * j + 1] + dy * f, tx: dx / segLen, ty: dy / segLen, s: dist };
+    }
+    j = k;
+  }
+  // ran off the end: last point, direction of the last segment
+  const k = j, h = j - dir;
+  if (h < 0 || h >= n) return { x: p[2 * i], y: p[2 * i + 1], tx: 1, ty: 0, s: 0 };
+  const dx = p[2 * k] - p[2 * h], dy = p[2 * k + 1] - p[2 * h + 1], l = Math.hypot(dx, dy) || 1;
+  return { x: p[2 * k], y: p[2 * k + 1], tx: dx / l, ty: dy / l, s: Math.abs(arc[k] - arc[i]) };
+}
+
+// polyline shortened by d at both ends (null if too short)
+function trimLine(p, d) {
+  const n = p.length / 2;
+  const arc = [0];
+  for (let i = 1; i < n; i++) arc.push(arc[i - 1] + Math.hypot(p[2 * i] - p[2 * i - 2], p[2 * i + 1] - p[2 * i - 1]));
+  const total = arc[n - 1];
+  if (total < 2 * d + 0.5) return null;
+  const a = pointAlong(p, arc, 0, 1, d), b = pointAlong(p, arc, n - 1, -1, d);
+  const out = [a.x, a.y];
+  for (let i = 1; i < n - 1; i++) if (arc[i] > d && arc[i] < total - d) out.push(p[2 * i], p[2 * i + 1]);
+  out.push(b.x, b.y);
+  return out;
+}
+
+// convex hull of [[x,y],...], counter-clockwise
+function convexHull(pts) {
+  const p = pts.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  if (p.length < 3) return p;
+  const cr = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const lo = [], up = [];
+  for (const q of p) { while (lo.length >= 2 && cr(lo[lo.length - 2], lo[lo.length - 1], q) <= 0) lo.pop(); lo.push(q); }
+  for (let i = p.length - 1; i >= 0; i--) { const q = p[i]; while (up.length >= 2 && cr(up[up.length - 2], up[up.length - 1], q) <= 0) up.pop(); up.push(q); }
+  return lo.slice(0, -1).concat(up.slice(0, -1));
 }
 
 function bbox(f) {
