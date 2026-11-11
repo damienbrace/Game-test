@@ -1,0 +1,21 @@
+[out:json][timeout:180];
+(
+  way["highway"](-33.365,115.612,-33.300,115.690);
+  way["building"](-33.365,115.612,-33.300,115.690);
+  relation["building"](-33.365,115.612,-33.300,115.690);
+  way["natural"~"^(water|coastline|beach|sand|wood|scrub|wetland|grassland)$"](-33.365,115.612,-33.300,115.690);
+  relation["natural"~"^(water|beach|sand|wood|scrub|wetland)$"](-33.365,115.612,-33.300,115.690);
+  way["waterway"~"^(river|riverbank|canal|dock)$"](-33.365,115.612,-33.300,115.690);
+  way["water"](-33.365,115.612,-33.300,115.690);
+  way["leisure"~"^(park|pitch|garden|golf_course|playground|recreation_ground|marina|sports_centre|stadium)$"](-33.365,115.612,-33.300,115.690);
+  relation["leisure"~"^(park|pitch|golf_course|recreation_ground|marina)$"](-33.365,115.612,-33.300,115.690);
+  way["landuse"~"^(grass|forest|meadow|recreation_ground|cemetery|village_green|basin|reservoir)$"](-33.365,115.612,-33.300,115.690);
+  relation["landuse"~"^(grass|forest|meadow|recreation_ground|basin|reservoir)$"](-33.365,115.612,-33.300,115.690);
+  way["man_made"~"^(pier|breakwater|groyne|lighthouse)$"](-33.365,115.612,-33.300,115.690);
+  node["man_made"="lighthouse"](-33.365,115.612,-33.300,115.690);
+  way["amenity"="parking"](-33.365,115.612,-33.300,115.690);
+  way["railway"="rail"](-33.365,115.612,-33.300,115.690);
+);
+out body;
+>;
+out skel qt;
