@@ -28,6 +28,7 @@ map data is fetched. Add `?debug` to the URL for an FPS / draw-call overlay.
 | Handbrake | Space | A / Cross | HAND BRAKE |
 | Reset car to road | R | B / Circle | RESET (top right) |
 | Switch camera | C | Y / Triangle | CAM (top right) |
+| Sound on / off | M | – | SOUND (top right) |
 
 All input methods work at the same time. Touch controls appear only on touch
 devices; landscape is recommended on phones. Driving into the sea or inlet
@@ -43,6 +44,9 @@ resets the car to the last dry spot; grass, scrub and sand are drivable but slow
 - `src/camera.js` – chase and high cameras
 - `src/input.js` – keyboard, gamepad and touch input
 - `src/hud.js` – speed, street name, minimap
+- `src/audio.js` – procedural Web Audio sound (engine, tyres, impacts,
+  splash); starts on the first key / touch / click, mute remembered locally.
+  Tuning constants are in `TUNE` at the top of the file
 - `data/bunbury.json` – preprocessed map data (generated, see below)
 - `tools/` – map data pipeline
 - `vendor/three/` – three.js r170 module build (MIT licence)
