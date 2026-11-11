@@ -4,6 +4,7 @@ import { Car } from './car.js';
 import { Input } from './input.js';
 import { CameraRig } from './camera.js';
 import { Hud } from './hud.js';
+import { GameAudio } from './audio.js';
 
 const STEP = 1 / 120; // physics step (s)
 const params = new URLSearchParams(location.search);
@@ -44,6 +45,8 @@ function makeSky(scene, horizon) {
 }
 
 async function start() {
+  const audio = new GameAudio(); // starts on the first key / touch / click
+  audio.bindButton(document.getElementById('btn-mute'));
   const isTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0 || matchMedia('(pointer: coarse)').matches;
   const renderer = new THREE.WebGLRenderer({ antialias: !isTouch || devicePixelRatio < 2, powerPreference: 'high-performance' });
   let pixelRatio = Math.min(devicePixelRatio || 1, isTouch ? 1.5 : 2);
@@ -87,7 +90,7 @@ async function start() {
   const hud = new Hud(hudRoot, world);
   const rig = new CameraRig(camera, world);
   car.onReset = () => { rig.snap(); hud.message('Car reset'); };
-  if (!isTouch) hud.message('W A S D / arrows to drive · Space handbrake · R reset · C camera', 6);
+  if (!isTouch) hud.message('W A S D / arrows to drive · Space handbrake · R reset · C camera · M sound', 6);
 
   addEventListener('resize', () => {
     renderer.setSize(innerWidth, innerHeight);
@@ -123,6 +126,7 @@ async function start() {
     rig.update(dt, car);
     sky.position.copy(camera.position);
     hud.update(dt, car);
+    audio.update(dt, car, inp);
     renderer.render(scene, camera);
 
     // frame timing + simple dynamic resolution for slow devices
@@ -141,7 +145,7 @@ async function start() {
   }
   requestAnimationFrame(frame);
 
-  window.__game = { car, world, rig, input, stats, renderer, scene, camera };
+  window.__game = { car, world, rig, input, stats, renderer, scene, camera, audio };
 }
 
 start().catch((e) => {
