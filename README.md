@@ -29,10 +29,29 @@ map data is fetched. Add `?debug` to the URL for an FPS / draw-call overlay.
 | Reset car to road | R | B / Circle | RESET (top right) |
 | Switch camera | C | Y / Triangle | CAM (top right) |
 | Sound on / off | M | – | SOUND (top right) |
+| Graphics quality | – | – | LOW / MED / HIGH button (top right) |
 
 All input methods work at the same time. Touch controls appear only on touch
 devices; landscape is recommended on phones. Driving into the sea or inlet
 resets the car to the last dry spot; grass, scrub and sand are drivable but slow.
+
+## Graphics quality
+
+Three levels, chosen automatically (desktop: high; tablets: medium; phones and
+low-DPR touch screens: low). Override with `?quality=low|medium|high`, or tap
+the quality button to cycle it (remembered in localStorage).
+
+- **low** – no shadow map (the car keeps its blob shadow), one detail texture
+  lookup on the ground; costs about the same as the old flat-lit renderer.
+- **medium** – 2048 sun shadow map covering ~±150 m around the camera focus.
+- **high** – 4096 soft (PCF) shadow map covering ~±230 m, all detail layers,
+  MSAA always on.
+
+The sun's shadow map follows the camera and is snapped to whole texels in
+light space, so static shadows do not shimmer; shadows fade out at its edge.
+Sun position, sky, fog, haze and light colours all derive from
+`Lighting.setSun(elevation, azimuth)` (src/lighting.js), so time of day can be
+animated later.
 
 ## Files
 
@@ -44,6 +63,16 @@ resets the car to the last dry spot; grass, scrub and sand are drivable but slow
   verandahs, sheds, …), hipped/gable/flat roofs and the generated facade atlas
 - `src/car.js` – car model and arcade handling, building/tree collision
 - `src/camera.js` – chase and high cameras
+- `src/quality.js` – low / medium / high presets and auto-detection
+- `src/lighting.js` – sun, hemisphere light, fog colours, moving shadow map
+- `src/sky.js` – sky dome (gradient, horizon haze, sun halo and disc)
+- `src/materials.js` – lit ground / object / building materials, water
+  reflection and glint, global shader tweaks (sun haze in fog, shadow edge
+  fade, colour-preserving tone curve)
+- `src/textures.js` – procedural tileable detail texture (asphalt, grass,
+  sand, paving)
+- `src/ao.js` – ground ambient-occlusion map baked at load from building
+  footprints and trees
 - `src/input.js` – keyboard, gamepad and touch input
 - `src/hud.js` – speed, street name, minimap
 - `src/audio.js` – procedural Web Audio sound (engine, tyres, impacts,

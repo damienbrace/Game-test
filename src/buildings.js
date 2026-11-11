@@ -16,6 +16,7 @@
 // Map space: x east, y north. World: (x, height, -y).
 
 import * as THREE from 'three';
+import { enhanceBuildingMaterial } from './materials.js';
 
 const CHUNK = 1000;
 
@@ -218,7 +219,7 @@ function buildingMaterial(tex) {
       .replace('#include <color_fragment>', '');
   };
   mat.customProgramCacheKey = () => 'building-tint-atlas';
-  return mat;
+  return enhanceBuildingMaterial(mat); // contact shading, weathering, shadows (src/materials.js)
 }
 
 // ---------------------------------------------------------------- 2D helpers
@@ -945,6 +946,7 @@ export function addBuildings(world, buildings) {
     geo.computeBoundingSphere();
     const m = new THREE.Mesh(geo, world.buildingMaterial);
     m.matrixAutoUpdate = false;
+    m.castShadow = m.receiveShadow = true;
     world.group.add(m);
   }
   world.stats.buildingTris = G.tris;

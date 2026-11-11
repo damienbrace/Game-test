@@ -7,6 +7,7 @@
 
 import * as THREE from 'three';
 import { addBuildings } from './buildings.js';
+import { makeGroundMaterial, makeObjectMaterial } from './materials.js';
 
 export const TILE = 500;
 
@@ -1015,10 +1016,10 @@ export class World {
 
   // ------------------------------------------------------------ meshes
   finishMeshes() {
-    const flatMat = makeFlatMaterial();
+    const flatMat = makeGroundMaterial(); // lit, shadow-receiving, depthWrite:false (src/materials.js)
     const uTime = flatMat.userData.uTime;
     const tickWater = () => { uTime.value = (performance.now() / 1000) % 2000; };
-    const objMat = new THREE.MeshLambertMaterial({ vertexColors: true });
+    const objMat = makeObjectMaterial();
     this.flatMaterial = flatMat;
     this.objMaterial = objMat;
     for (const [k, layers] of this.flat) {
@@ -1042,6 +1043,7 @@ export class World {
       const m = new THREE.Mesh(geo, flatMat);
       m.renderOrder = -5;
       m.onBeforeRender = tickWater;
+      m.receiveShadow = true;
       m.matrixAutoUpdate = false;
       this.group.add(m);
       this.stats.flatTris += n;
@@ -1055,50 +1057,20 @@ export class World {
       geo.computeBoundingSphere();
       const m = new THREE.Mesh(geo, objMat);
       m.matrixAutoUpdate = false;
+      m.castShadow = m.receiveShadow = true;
       this.group.add(m);
       this.stats.objTris += o.p.length / 9;
     }
     this.objs = null;
     // ground under everything (land colour); the sea is drawn on top of it
-    const g = new THREE.Mesh(new THREE.PlaneGeometry(40000, 40000), new THREE.MeshBasicMaterial({ color: C.ground, depthWrite: false }));
+    const g = new THREE.Mesh(new THREE.PlaneGeometry(40000, 40000), makeGroundMaterial({ color: C.ground }));
     g.rotation.x = -Math.PI / 2;
     g.renderOrder = -10;
+    g.receiveShadow = true;
     g.position.set((this.bounds[0] + this.bounds[2]) / 2, 0, -(this.bounds[1] + this.bounds[3]) / 2);
     this.ground = g;
     this.group.add(g);
   }
-}
-
-// Material for the flat ground layers. Water is recognised by its strongly
-// blue vertex colour and gets a cheap animated ripple / colour drift (a few
-// sines per fragment, water pixels only).
-function makeFlatMaterial() {
-  const mat = new THREE.MeshBasicMaterial({ vertexColors: true, depthWrite: false, side: THREE.DoubleSide });
-  const uTime = { value: 0 };
-  mat.userData.uTime = uTime;
-  mat.onBeforeCompile = (sh) => {
-    sh.uniforms.uTime = uTime;
-    sh.vertexShader = sh.vertexShader
-      .replace('#include <common>', '#include <common>\nvarying vec2 vWP;')
-      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvWP = position.xz;');
-    sh.fragmentShader = sh.fragmentShader
-      .replace('#include <common>', '#include <common>\nvarying vec2 vWP;\nuniform float uTime;')
-      .replace('#include <color_fragment>', [
-        '#include <color_fragment>',
-        '#ifdef USE_COLOR',
-        'if (vColor.b > vColor.g * 1.4 && vColor.b > vColor.r * 4.0) {',
-        '  vec2 p = vWP; float t = uTime;',
-        '  float big = 0.6 * sin(p.x * 0.0061 + 1.3) * sin(p.y * 0.0047 - 0.4) + 0.25 * sin(p.x * 0.0137 - p.y * 0.0081 + t * 0.05) + 0.2 * sin(p.x * 0.0029 + p.y * 0.0113 - t * 0.03);',
-        '  float near = 1.0 - smoothstep(40.0, 220.0, distance(cameraPosition.xz, p));',
-        '  float rip = sin(p.x * 0.21 + sin(p.y * 0.13) * 1.7 + t * 1.1) * sin(p.y * 0.17 - sin(p.x * 0.11) * 1.5 - t * 0.8);',
-        '  float glint = smoothstep(0.9, 1.0, rip) * 0.035 * near;',
-        '  diffuseColor.rgb *= 1.0 + 0.06 * big + 0.025 * rip * near;',
-        '  diffuseColor.rgb += vec3(glint * 0.8, glint, glint);',
-        '}',
-        '#endif',
-      ].join('\n'));
-  };
-  return mat;
 }
 
 // polyline (flat) shifted sideways by `off` (positive = left), with mitred
