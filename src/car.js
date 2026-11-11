@@ -17,14 +17,30 @@ const COL_OFFS = [1.3, 0, -1.3];
 const SURF = {
   road: { grip: 1, drag: 0.25, vmax: 1, acc: 1 },
   paved: { grip: 0.95, drag: 0.35, vmax: 1, acc: 1 },
-  gravel: { grip: 0.7, drag: 0.9, vmax: 0.7, acc: 0.85 },
-  grass: { grip: 0.7, drag: 2.2, vmax: 0.5, acc: 0.7 },
-  rough: { grip: 0.6, drag: 3.0, vmax: 0.42, acc: 0.6 },
-  sand: { grip: 0.5, drag: 3.6, vmax: 0.38, acc: 0.55 },
+  gravel: { grip: 0.7, drag: 0.6, vmax: 0.7, acc: 0.85 },  // ~95 km/h flat out
+  grass: { grip: 0.7, drag: 1.4, vmax: 0.5, acc: 0.7 },    // ~60 km/h
+  rough: { grip: 0.6, drag: 2.0, vmax: 0.42, acc: 0.6 },   // ~45 km/h
+  sand: { grip: 0.5, drag: 2.3, vmax: 0.38, acc: 0.55 },   // ~40 km/h
   water: { grip: 0.2, drag: 14, vmax: 0.1, acc: 0.1 },
 };
 
-const TOP_SPEED = 50; // m/s (180 km/h)
+// longitudinal tuning (m/s, m/s^2). Roughly 0-60 km/h in 3 s, 0-100 in 6 s,
+// ~135 km/h flat out on the road: lively, but still drivable on suburban streets.
+const TOP_SPEED = 40;
+const ACCEL = 7.4;       // drive acceleration at standstill (tapers to 0 at TOP_SPEED)
+const BRAKE = 14;        // service brake
+const REV_ACC = 5;       // reverse
+const REV_MAX = 8.5;     // ~30 km/h
+const COAST = 1.1;       // engine braking with no pedal
+// lateral grip (m/s^2 of cornering before the yaw rate is capped)
+const LAT_GRIP = 12.5, LAT_GRIP_HB = 19;
+// wall / tree contact
+const WALL_FRICTION = 0.25;  // tangential speed lost per unit of impact speed
+const BOUNCE = 0.15, BOUNCE_MAX = 2.2, BOUNCE_MIN = 2; // m/s; resting contact never bounces
+const ALIGN_RATE = 7;        // 1/s: how quickly a glancing hit turns the car along the wall
+
+const wrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 
 export class Car {
   constructor(world) {
@@ -32,7 +48,11 @@ export class Car {
     this.x = 0; this.y = 0; this.heading = 0;
     this.vx = 0; this.vy = 0;
     this.yawRate = 0;
-    this.steer = 0;
+    this.steer = 0;     // front wheel angle (rad)
+    this.steerIn = 0;   // smoothed steering input (-1..1)
+    this.hbAmt = 0;     // smoothed handbrake (0..1), so drifts blend in and out
+    this.contactT = 0;  // > 0 for a moment after touching a wall or tree
+    this.deflect = 0;   // extra yaw rate (rad/s) from glancing off a wall
     this.vF = 0; this.vL = 0;
     this.surface = 'road';
     this.waterTime = 0;
@@ -145,7 +165,8 @@ export class Car {
   // ------------------------------------------------------------ state
   place(x, y, heading) {
     this.x = x; this.y = y; this.heading = heading;
-    this.vx = this.vy = 0; this.yawRate = 0; this.steer = 0; this.vF = this.vL = 0;
+    this.vx = this.vy = 0; this.yawRate = 0; this.steer = this.steerIn = 0; this.vF = this.vL = 0;
+    this.hbAmt = 0; this.contactT = 0; this.deflect = 0; this.impact = 0;
     this.waterTime = 0;
     this.prev = { x, y, heading };
   }
@@ -174,26 +195,43 @@ export class Car {
     this.surface = surfName;
     const S = SURF[surfName] || SURF.grass;
 
-    const hb = input.handbrake;
-    // 1. steering: speed-sensitive maximum wheel angle, smoothed
+    const thr = clamp(input.throttle || 0, 0, 1), brk = clamp(input.brake || 0, 0, 1);
+    this.hbAmt += ((input.handbrake ? 1 : 0) - this.hbAmt) * Math.min(1, dt * (input.handbrake ? 10 : 5));
+    const hb = this.hbAmt;
+    const touching = this.contactT > 0;
+
+    // 1. steering. The input is smoothed (so keyboard taps ramp in over ~0.2 s
+    // at any speed), then scaled by a speed-sensitive full-lock angle chosen so
+    // that full lock is just past the grip limit: analog input stays
+    // proportional all the way across the stick instead of saturating early.
     let fx = Math.sin(this.heading), fy = Math.cos(this.heading);
     let vF = this.vx * fx + this.vy * fy;
     const spd = Math.abs(vF);
-    const steerMax = 0.62 / (1 + spd / 11);
-    const target = input.steer * steerMax;
-    const rate = Math.abs(target) < Math.abs(this.steer) || Math.sign(target) !== Math.sign(this.steer) ? 6 : 3.2;
-    const ds = target - this.steer;
-    this.steer += Math.max(-rate * dt, Math.min(rate * dt, ds));
-
-    // 2. yaw: kinematic bicycle model, capped by available lateral grip
-    let yawTarget = (vF * Math.tan(this.steer)) / WHEELBASE;
-    const maxLat = (hb ? 19 : 12.5) * (0.5 + 0.5 * S.grip);
+    const sIn = clamp(input.steer || 0, -1, 1);
+    const back = Math.abs(sIn) < Math.abs(this.steerIn) || Math.sign(sIn) !== Math.sign(this.steerIn);
+    const sRate = (back ? 9 : 5.5) * dt;
+    this.steerIn += clamp(sIn - this.steerIn, -sRate, sRate);
+    const maxLat = (LAT_GRIP + (LAT_GRIP_HB - LAT_GRIP) * hb) * (0.5 + 0.5 * S.grip);
     const lim = maxLat / Math.max(2, spd);
-    yawTarget = Math.max(-lim, Math.min(lim, yawTarget));
-    if (hb && spd > 4) yawTarget *= 1.45;
-    const yawResp = (hb ? 3.5 : 9) * (0.4 + 0.6 * S.grip);
+    const steerMax = Math.min(0.56, Math.atan((lim * 1.15 * WHEELBASE) / Math.max(0.5, spd)));
+    this.steer = this.steerIn * steerMax;
+
+    // 2. yaw: kinematic bicycle model, capped by available lateral grip.
+    // Pressed against a wall at a standstill, throttle still lets the car
+    // pivot (as if scrubbing its tyres), so it can always steer free.
+    let vYaw = vF;
+    if (touching && spd < 3) {
+      const push = thr > brk ? thr : -brk;
+      if (Math.abs(push) * 3 > Math.abs(vYaw)) vYaw = push * 3;
+    }
+    let yawTarget = (vYaw * Math.tan(this.steer)) / WHEELBASE;
+    yawTarget = clamp(yawTarget, -lim, lim);
+    if (spd > 4) yawTarget *= 1 + 0.45 * hb;
+    const yawResp = (9 - 5.5 * hb) * (0.4 + 0.6 * S.grip);
     this.yawRate += (yawTarget - this.yawRate) * Math.min(1, dt * yawResp);
-    this.heading += this.yawRate * dt;
+    this.heading += (this.yawRate + this.deflect) * dt;
+    this.deflect *= Math.exp(-dt * 8);
+    if (Math.abs(this.deflect) < 1e-3) this.deflect = 0;
 
     // 3. decompose velocity in the new frame (this is what lets the car slide)
     fx = Math.sin(this.heading); fy = Math.cos(this.heading);
@@ -202,20 +240,21 @@ export class Car {
     let vL = this.vx * rx + this.vy * ry;
 
     // 4. longitudinal forces
-    const thr = input.throttle, brk = input.brake;
     const vmax = TOP_SPEED * S.vmax;
     let drive = 0, resist = S.drag + 0.0011 * vF * vF;
     if (thr > 0) {
-      if (vF < -0.5) resist += 16 * thr;
-      else drive += 11.5 * thr * S.acc * Math.max(0, 1 - Math.pow(Math.max(0, vF) / vmax, 2));
+      if (vF < -0.5) resist += 16 * thr; // throttle while rolling back acts as a brake
+      else drive += ACCEL * thr * S.acc * Math.max(0, 1 - Math.pow(Math.max(0, vF) / vmax, 2));
     }
     if (brk > 0) {
-      if (vF > 0.5) resist += 17 * brk;
-      else if (vF > -13 * Math.max(0.5, S.vmax)) drive -= 7 * brk * S.acc;
+      if (vF > 0.5) resist += BRAKE * brk;
+      else if (vF > -REV_MAX * Math.max(0.5, S.vmax)) drive -= REV_ACC * brk * S.acc;
     }
-    if (thr === 0 && brk === 0) resist += 1.1; // engine braking
-    if (hb) resist += 5.5;
-    if (vF > vmax * 1.05) resist += (vF - vmax) * 2; // e.g. driving off road at speed
+    if (thr === 0 && brk === 0) resist += COAST;
+    if (input.handbrake) resist += 4.5;
+    // above the surface's top speed (e.g. leaving the road at speed): bleed off
+    // firmly, but not like hitting a wall
+    if (Math.abs(vF) > vmax * 1.05) resist += (Math.abs(vF) - vmax) * 1.2;
     const before = vF;
     vF += drive * dt;
     const dec = resist * dt;
@@ -223,18 +262,25 @@ export class Car {
     else vF -= Math.sign(vF) * dec;
     this.accelLong = (vF - before) / dt;
 
-    // 5. lateral grip (lower with handbrake / loose surfaces -> drift)
-    const latGrip = (hb ? 1.5 : 8.5) * S.grip;
+    // 5. lateral grip (lower with handbrake / loose surfaces -> drift). While
+    // scraping a wall the tyres give way, so the car slides along it instead
+    // of gripping against it.
+    let latGrip = (8.5 - 7 * hb) * S.grip;
+    if (touching) latGrip *= 0.3;
     vL *= Math.exp(-latGrip * dt);
 
     this.vx = fx * vF + rx * vL;
     this.vy = fy * vF + ry * vL;
-    this.vF = vF; this.vL = vL;
     this.x += this.vx * dt;
     this.y += this.vy * dt;
 
-    this.collide();
+    this.contactT = Math.max(0, this.contactT - dt);
+    this.collide(dt);
     this.clampBounds();
+    // report the post-collision velocity
+    this.vF = this.vx * fx + this.vy * fy;
+    this.vL = this.vx * rx + this.vy * ry;
+    vF = this.vF;
 
     // water: car bogs down and is reset to the last safe spot
     if (surfName === 'water') {
@@ -256,83 +302,118 @@ export class Car {
     this.wheelSpin += (vF / WHEEL_R) * dt;
     // visual body motion
     const latAcc = this.yawRate * vF;
-    this.roll += (Math.max(-0.07, Math.min(0.07, -latAcc * 0.006)) - this.roll) * Math.min(1, dt * 8);
-    this.pitch += (Math.max(-0.05, Math.min(0.05, -this.accelLong * 0.004)) - this.pitch) * Math.min(1, dt * 6);
+    this.roll += (clamp(-latAcc * 0.006, -0.07, 0.07) - this.roll) * Math.min(1, dt * 8);
+    this.pitch += (clamp(-this.accelLong * 0.004, -0.05, 0.05) - this.pitch) * Math.min(1, dt * 6);
     this.impact *= Math.exp(-dt * 6);
   }
 
-  collide() {
-    const w = this.world;
-    const G = w.CG;
-    for (let iter = 0; iter < 2; iter++) {
+  // Push the three collision circles out of building walls and trees, then
+  // resolve velocity: the part into the obstacle is removed (with a small
+  // bounce only for real hits, so resting contact never jitters), and the part
+  // along it is kept minus a loss proportional to the impact speed (glancing
+  // hits cost little, square hits stop the car). A glancing hit also turns the
+  // car along the wall, so the tyres do not keep driving it back in.
+  collide(dt) {
+    let best = null; // strongest contact this step
+    for (let iter = 0; iter < 3; iter++) {
       let hit = false;
       const fx = Math.sin(this.heading), fy = Math.cos(this.heading);
       for (const off of COL_OFFS) {
-        let cx = this.x + fx * off, cy = this.y + fy * off;
-        const r = COL_R;
-        let pushX = 0, pushY = 0;
-        const gx0 = Math.floor((cx - r) / G), gx1 = Math.floor((cx + r) / G);
-        const gy0 = Math.floor((cy - r) / G), gy1 = Math.floor((cy + r) / G);
-        for (let gx = gx0; gx <= gx1; gx++) for (let gy = gy0; gy <= gy1; gy++) {
-          const cell = w.colGrid.get(gx * 65536 + gy);
-          if (!cell) continue;
-          // deep penetration recovery: centre inside a footprint
-          for (const poly of cell.p) {
-            const bb = poly.bb;
-            if (cx < bb[0] || cx > bb[2] || cy < bb[1] || cy > bb[3]) continue;
-            if (!pointInRing(cx, cy, poly.p)) continue;
-            const q = nearestOnRing(cx, cy, poly.p);
-            const dx = q[0] - cx, dy = q[1] - cy, d = Math.hypot(dx, dy) || 1e-6;
-            pushX += (dx / d) * (d + r); pushY += (dy / d) * (d + r);
-            cx += (dx / d) * (d + r); cy += (dy / d) * (d + r);
-          }
-          for (const s of cell.s) {
-            const dx = s[2] - s[0], dy = s[3] - s[1];
-            const l2 = dx * dx + dy * dy || 1e-9;
-            let t = ((cx - s[0]) * dx + (cy - s[1]) * dy) / l2;
-            t = t < 0 ? 0 : t > 1 ? 1 : t;
-            const qx = s[0] + dx * t, qy = s[1] + dy * t;
-            let nx = cx - qx, ny = cy - qy;
-            const d = Math.hypot(nx, ny);
-            if (d >= r) continue;
-            if (d < 1e-6) { nx = dy; ny = -dx; const l = Math.hypot(nx, ny) || 1; nx /= l; ny /= l; } else { nx /= d; ny /= d; }
-            const pen = r - d;
-            pushX += nx * pen; pushY += ny * pen;
-            cx += nx * pen; cy += ny * pen;
-          }
-          for (const c of cell.c) {
-            let nx = cx - c[0], ny = cy - c[1];
-            const d = Math.hypot(nx, ny), rr = r + c[2];
-            if (d >= rr) continue;
-            if (d < 1e-6) { nx = 1; ny = 0; } else { nx /= d; ny /= d; }
-            const pen = rr - d;
-            pushX += nx * pen; pushY += ny * pen;
-            cx += nx * pen; cy += ny * pen;
-          }
-        }
-        const pl = Math.hypot(pushX, pushY);
-        if (pl > 1e-5) {
-          hit = true;
-          this.x += pushX; this.y += pushY;
-          const nx = pushX / pl, ny = pushY / pl;
-          const vn = this.vx * nx + this.vy * ny;
-          if (vn < 0) {
-            // remove the velocity into the wall (+ a little bounce)
-            this.vx -= nx * vn * 1.15;
-            this.vy -= ny * vn * 1.15;
-            // wall friction proportional to the impact, so grazing or
-            // resting against a wall never glues the car to it
-            const tx = -ny, ty = nx;
-            const vt = this.vx * tx + this.vy * ty;
-            const f = Math.min(Math.abs(vt), -vn * 0.35) * Math.sign(vt);
-            this.vx -= tx * f; this.vy -= ty * f;
-            this.yawRate *= 1 - Math.min(0.5, -vn * 0.08);
-            this.impact = Math.max(this.impact, Math.min(1, -vn / 15));
-          }
-        }
+        const p = this.pushOut(this.x + fx * off, this.y + fy * off, COL_R);
+        if (!p) continue;
+        hit = true;
+        this.x += p[0]; this.y += p[1];
+        const pl = Math.hypot(p[0], p[1]);
+        const nx = p[0] / pl, ny = p[1] / pl;
+        const vn = this.vx * nx + this.vy * ny;
+        if (!best) best = { nx, ny, imp: 0, tree: p[2] };
+        if (vn >= 0) continue;
+        const imp = -vn;
+        const tx = -ny, ty = nx;
+        let vt = this.vx * tx + this.vy * ty;
+        vt -= Math.sign(vt) * Math.min(Math.abs(vt), imp * WALL_FRICTION);
+        const bounce = Math.min(BOUNCE_MAX, Math.max(0, imp - BOUNCE_MIN) * BOUNCE);
+        this.vx = tx * vt + nx * bounce;
+        this.vy = ty * vt + ny * bounce;
+        if (imp >= best.imp) best = { nx, ny, imp, tree: p[2] };
+        this.yawRate *= 1 - Math.min(0.6, imp * 0.06);
+        this.impact = Math.max(this.impact, Math.min(1, imp / 15));
       }
       if (!hit) break;
     }
+    if (!best) return;
+    this.contactT = 0.15;
+
+    // turn the direction of travel along the wall
+    const fx = Math.sin(this.heading), fy = Math.cos(this.heading);
+    const vF = this.vx * fx + this.vy * fy;
+    const tx = -best.ny, ty = best.nx;
+    const vt = this.vx * tx + this.vy * ty;
+    if (Math.abs(vt) < 0.4 || Math.abs(vF) < 0.4) return;
+    const dirSign = Math.sign(vF); // travelling nose-first or tail-first
+    if ((fx * best.nx + fy * best.ny) * dirSign >= 0) return; // already pointing away
+    const st = Math.sign(vt);
+    let target = Math.atan2(tx * st, ty * st);
+    if (dirSign < 0) target += Math.PI;
+    const diff = wrap(target - this.heading);
+    const deg = (Math.abs(diff) * 180) / Math.PI;
+    // full strength up to 50 deg into the wall, none past 80 (head-on: just stop)
+    // a tree is a point, so only nudge the car round it rather than lining it up
+    const w = clamp((80 - deg) / 30, 0, 1) * (best.tree ? 0.4 : 1);
+    if (w <= 0) return;
+    const want = diff * ALIGN_RATE * w;
+    if (Math.sign(want) !== Math.sign(this.deflect) || Math.abs(want) > Math.abs(this.deflect)) this.deflect = want;
+    // don't let the steering model fight the deflection
+    if (Math.sign(this.yawRate) !== Math.sign(diff)) this.yawRate *= Math.exp(-dt * 20);
+  }
+
+  // total push (dx, dy) that moves a circle at (cx, cy) out of walls, building
+  // footprints and trees ([dx, dy, touchedTree]), or null if it touches nothing
+  pushOut(cx, cy, r) {
+    const w = this.world;
+    const G = w.CG;
+    let pushX = 0, pushY = 0, tree = false;
+    const gx0 = Math.floor((cx - r) / G), gx1 = Math.floor((cx + r) / G);
+    const gy0 = Math.floor((cy - r) / G), gy1 = Math.floor((cy + r) / G);
+    for (let gx = gx0; gx <= gx1; gx++) for (let gy = gy0; gy <= gy1; gy++) {
+      const cell = w.colGrid.get(gx * 65536 + gy);
+      if (!cell) continue;
+      // deep penetration recovery: centre inside a footprint
+      for (const poly of cell.p) {
+        const bb = poly.bb;
+        if (cx < bb[0] || cx > bb[2] || cy < bb[1] || cy > bb[3]) continue;
+        if (!pointInRing(cx, cy, poly.p)) continue;
+        const q = nearestOnRing(cx, cy, poly.p);
+        const dx = q[0] - cx, dy = q[1] - cy, d = Math.hypot(dx, dy) || 1e-6;
+        pushX += (dx / d) * (d + r); pushY += (dy / d) * (d + r);
+        cx += (dx / d) * (d + r); cy += (dy / d) * (d + r);
+      }
+      for (const s of cell.s) {
+        const dx = s[2] - s[0], dy = s[3] - s[1];
+        const l2 = dx * dx + dy * dy || 1e-9;
+        let t = ((cx - s[0]) * dx + (cy - s[1]) * dy) / l2;
+        t = t < 0 ? 0 : t > 1 ? 1 : t;
+        const qx = s[0] + dx * t, qy = s[1] + dy * t;
+        let nx = cx - qx, ny = cy - qy;
+        const d = Math.hypot(nx, ny);
+        if (d >= r) continue;
+        if (d < 1e-6) { nx = dy; ny = -dx; const l = Math.hypot(nx, ny) || 1; nx /= l; ny /= l; } else { nx /= d; ny /= d; }
+        const pen = r - d;
+        pushX += nx * pen; pushY += ny * pen;
+        cx += nx * pen; cy += ny * pen;
+      }
+      for (const c of cell.c) {
+        let nx = cx - c[0], ny = cy - c[1];
+        const d = Math.hypot(nx, ny), rr = r + c[2];
+        if (d >= rr) continue;
+        if (d < 1e-6) { nx = 1; ny = 0; } else { nx /= d; ny /= d; }
+        const pen = rr - d;
+        pushX += nx * pen; pushY += ny * pen;
+        cx += nx * pen; cy += ny * pen;
+        tree = true;
+      }
+    }
+    return Math.hypot(pushX, pushY) > 1e-5 ? [pushX, pushY, tree] : null;
   }
 
   clampBounds() {
