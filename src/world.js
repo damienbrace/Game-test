@@ -7,13 +7,14 @@
 
 import * as THREE from 'three';
 import { addBuildings } from './buildings.js';
+import { addProps, addTree } from './props.js';
 
 export const TILE = 500;
 
 // Flat ground layers are drawn without depth writes, strictly in this order
 // (inside one tile mesh triangles render in index order and tiles never
 // overlap because every triangle is clipped to its tile). No z-fighting.
-const L = {
+export const L = {
   coastSand: 0, sea: 1, shallows: 2, coastEdge: 3, sand: 4, grass: 5, park: 6, wood: 7, pitch: 8, water: 9, land: 10,
   waterEdge: 11, shadow: 12, parking: 13, court: 14, pitchMark: 15, rail: 16, pier: 17, path: 18, kerb: 19, asphalt: 20,
   island: 21, marking: 22, bridgeDeck: 23, bridgeAsphalt: 24, bridgeMarking: 25,
@@ -119,6 +120,7 @@ export class World {
     this.buildTrees();
     this.buildPois();
     this.buildRoadGrid();
+    addProps(this); // street furniture, lights, signals, fences (src/props.js)
     this.finishMeshes();
     this.buildRaster();
     this.buildMinimap();
@@ -774,48 +776,11 @@ export class World {
     });
   }
 
+  // scattered park / wood trees; shapes and colliders live in src/props.js
+  // (treeKinds: one digit per tree, chosen by the map build)
   buildTrees() {
-    const t = this.data.trees;
-    const ico = new THREE.IcosahedronGeometry(1, 0); // already non-indexed
-    const ip = ico.attributes.position.array;
-    const greens = [0x5d7f3c, 0x6c8f4a, 0x4f7036, 0x7a9450, 0x587a46].map(col);
-    const trunk = col(0x6b5340);
-    for (let k = 0; k < t.length; k += 3) {
-      const x = t[k], y = t[k + 1], s = t[k + 2];
-      const o = this.obj(x, y);
-      const g = greens[Math.floor(hash(k + 11) * greens.length)];
-      const sx = 2.4 * s, sy = 2.1 * s, cy = 3.4 * s;
-      const rot = hash(k + 5) * 6.28;
-      const cr = Math.cos(rot), sr = Math.sin(rot);
-      for (let i = 0; i < ip.length; i += 9) {
-        const v = [];
-        for (let q = 0; q < 3; q++) {
-          const px = ip[i + q * 3], py = ip[i + q * 3 + 1], pz = ip[i + q * 3 + 2];
-          v.push([x + (px * cr - pz * sr) * sx, cy + py * sy, -y + (px * sr + pz * cr) * sx]);
-        }
-        const ux = v[1][0] - v[0][0], uy = v[1][1] - v[0][1], uz = v[1][2] - v[0][2];
-        const wx = v[2][0] - v[0][0], wy = v[2][1] - v[0][1], wz = v[2][2] - v[0][2];
-        let nx = uy * wz - uz * wy, ny = uz * wx - ux * wz, nz = ux * wy - uy * wx;
-        const l = Math.hypot(nx, ny, nz) || 1;
-        nx /= l; ny /= l; nz /= l;
-        // icosahedron faces point away from its centre
-        const mx = (v[0][0] + v[1][0] + v[2][0]) / 3 - x, my = (v[0][1] + v[1][1] + v[2][1]) / 3 - cy, mz = (v[0][2] + v[1][2] + v[2][2]) / 3 + y;
-        if (nx * mx + ny * my + nz * mz < 0) { nx = -nx; ny = -ny; nz = -nz; }
-        const shade = g.clone().multiplyScalar(0.85 + 0.25 * Math.max(0, ny));
-        this.tri3(o, v[0], v[1], v[2], [nx, ny, nz], shade);
-      }
-      // trunk: triangular prism
-      const tr = 0.22 * s + 0.08, th = cy - sy * 0.5;
-      for (let q = 0; q < 3; q++) {
-        const a0 = rot + (q / 3) * Math.PI * 2, a1 = rot + ((q + 1) / 3) * Math.PI * 2;
-        const ax = x + Math.cos(a0) * tr, az = -y + Math.sin(a0) * tr, bx = x + Math.cos(a1) * tr, bz = -y + Math.sin(a1) * tr;
-        const am = (a0 + a1) / 2;
-        const nrm = [Math.cos(am), 0, Math.sin(am)];
-        this.tri3(o, [ax, 0, az], [bx, 0, bz], [bx, th, bz], nrm, trunk);
-        this.tri3(o, [ax, 0, az], [bx, th, bz], [ax, th, az], nrm, trunk);
-      }
-      this.addColCircle(x, y, 0.55);
-    }
+    const t = this.data.trees, kinds = this.data.treeKinds || '';
+    for (let k = 0; k < t.length; k += 3) addTree(this, t[k], t[k + 1], t[k + 2], +kinds[k / 3] || 0, k);
   }
 
   buildPois() {

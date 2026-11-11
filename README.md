@@ -42,6 +42,11 @@ resets the car to the last dry spot; grass, scrub and sand are drivable but slow
   collision grid, road lookup, surface raster and minimap image
 - `src/buildings.js` – building archetypes (houses, main-street shops with
   verandahs, sheds, …), hipped/gable/flat roofs and the generated facade atlas
+- `src/props.js` – street-level detail: tree shapes (eucalypt, peppermint,
+  Norfolk Island pine, palm, broadleaf), street lights, traffic signals,
+  painted crossings, bus stops, benches and other furniture, fences / walls,
+  power lines, playground equipment, car-park bay lines; merged into the
+  per-tile object meshes
 - `src/car.js` – car model and arcade handling, building/tree collision
 - `src/camera.js` – chase and high cameras
 - `src/input.js` – keyboard, gamepad and touch input
@@ -56,12 +61,14 @@ resets the car to the last dry spot; grass, scrub and sand are drivable but slow
 ## Regenerating the map data
 
 ```sh
-tools/fetch-osm.sh /tmp/bunbury-raw.json            # Overpass download (~6 MB)
-node tools/build-map.mjs /tmp/bunbury-raw.json data/bunbury.json
+tools/fetch-osm.sh /tmp/bunbury-raw.json /tmp/bunbury-points.json   # Overpass (~6 MB + 0.25 MB)
+node tools/build-map.mjs /tmp/bunbury-raw.json data/bunbury.json /tmp/bunbury-points.json
 ```
 
-The query is in `tools/bunbury.overpassql` (bbox lat −33.365…−33.300,
-lon 115.612…115.690). `build-map.mjs` (Node 18+, no dependencies) projects
+The queries are in `tools/bunbury.overpassql` (roads, buildings, land use,
+water) and `tools/bunbury-points.overpassql` (street detail: trees, lamps,
+signals, crossings, bus stops, furniture, barriers, power lines, playground
+equipment), both for bbox lat −33.365…−33.300, lon 115.612…115.690. `build-map.mjs` (Node 18+, no dependencies) projects
 everything to local metres around the CBD (−33.3267, 115.6370), rounds to
 0.1 m, keeps only the tags the game uses, and:
 
@@ -84,7 +91,15 @@ everything to local metres around the CBD (−33.3267, 115.6370), rounds to
   the building type;
 - drops the few buildings that a road centreline passes through, so roads
   are never blocked;
-- scatters trees in woods, scrub and parks, away from roads and buildings;
+- scatters trees in woods, scrub and parks, away from roads and buildings,
+  and picks each one's shape (Norfolk Island pines and palms near the coast,
+  eucalypts and peppermints inland; deterministic, OSM has no species here);
+- places street props: mapped trees, signals (a pole per approach), painted
+  crossings, bus stops, furniture, fences / walls, power towers and poles,
+  playground kit; street lights where mapped, otherwise along lit, arterial
+  and residential roads at the kerb; plus procedural playground kit in mapped
+  playgrounds without equipment. Every prop is checked to stand clear of all
+  carriageways, junctions, roundabouts, buildings and water;
 - finds the spawn point on Victoria Street.
 
 Do not commit the raw download; only `data/bunbury.json` is used at runtime
